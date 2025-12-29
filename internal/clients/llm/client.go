@@ -14,10 +14,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 type Client interface {
-	Generate(ctx context.Context, history []*llmv1.ConversationTurn, prompt string) (chan string, error)
+	Generate(ctx context.Context, traceID string, history []*llmv1.ConversationTurn, prompt string) (chan string, error)
 	Close()
 }
 
@@ -28,7 +29,6 @@ type GatewayClient struct {
 	log    zerolog.Logger
 }
 
-// NewGatewayClient artık sertifika yollarını da alıyor
 func NewGatewayClient(target, certPath, keyPath, caPath string, log zerolog.Logger) (*GatewayClient, error) {
 	var opts []grpc.DialOption
 
@@ -57,10 +57,14 @@ func NewGatewayClient(target, certPath, keyPath, caPath string, log zerolog.Logg
 	}, nil
 }
 
-func (c *GatewayClient) Generate(ctx context.Context, history []*llmv1.ConversationTurn, prompt string) (chan string, error) {
+func (c *GatewayClient) Generate(ctx context.Context, traceID string, history []*llmv1.ConversationTurn, prompt string) (chan string, error) {
+	// 1. Trace ID'yi Metadata'ya Ekle (Context Propagation)
+	md := metadata.Pairs("x-trace-id", traceID)
+	ctx = metadata.NewOutgoingContext(ctx, md)
+
 	req := &llmv1.GenerateDialogStreamRequest{
 		ModelSelector: "local",
-		TenantId:      "demo", 
+		TenantId:      "demo", // TODO: Session'dan gelmeli
 		LlamaRequest: &llmv1.GenerateStreamRequest{
 			UserPrompt: prompt,
 			History:    history,
@@ -86,7 +90,7 @@ func (c *GatewayClient) Generate(ctx context.Context, history []*llmv1.Conversat
 				return
 			}
 			if err != nil {
-				c.log.Error().Err(err).Msg("LLM Stream hatası")
+				c.log.Error().Err(err).Str("trace_id", traceID).Msg("LLM Stream hatası")
 				return
 			}
 			
@@ -139,11 +143,12 @@ func NewMockClient() *MockClient {
 	return &MockClient{}
 }
 
-func (m *MockClient) Generate(ctx context.Context, history []*llmv1.ConversationTurn, prompt string) (chan string, error) {
+func (m *MockClient) Generate(ctx context.Context, traceID string, history []*llmv1.ConversationTurn, prompt string) (chan string, error) {
 	outChan := make(chan string)
 	go func() {
 		defer close(outChan)
-		response := fmt.Sprintf("MOCK: '%s' dediniz. Ben Sentiric Dialog Service.", prompt)
+		response := fmt.Sprintf("MOCK [%s]: '%s' dediniz. Ben Sentiric Dialog Service.", traceID, prompt)
+		
 		for _, char := range response {
 			outChan <- string(char)
 			time.Sleep(20 * time.Millisecond)
@@ -154,5 +159,11 @@ func (m *MockClient) Generate(ctx context.Context, history []*llmv1.Conversation
 
 func (m *MockClient) Close() {}
 
-func int32Ptr(v int32) *int32 { return &v }
-func float32Ptr(v float32) *float32 { return &v }
+// --- Helper Functions for Protobuf Pointers ---
+func int32Ptr(v int32) *int32 {
+	return &v
+}
+
+func float32Ptr(v float32) *float32 {
+	return &v
+}

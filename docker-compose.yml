@@ -156,7 +156,7 @@ services:
       LLM_LLAMA_SERVICE_KEY_PATH: /sentiric-certificates/certs/llm-llama-service.key
 
       # --- LOGGING ---
-      LLM_LLAMA_SERVICE_LOG_LEVEL: debug
+      LLM_LLAMA_SERVICE_LOG_LEVEL: info
 
     networks:
       sentiric-net:

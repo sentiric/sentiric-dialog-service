@@ -85,11 +85,13 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			s.stateManager.AddTurn(currentSession, "user", userText)
 			currentInputBuffer.Reset()
 
-			// LLM Çağrısı (Streaming)
-			tokensChan, err := s.llmClient.Generate(ctx, currentSession.History, userText)
+			// SessionID'yi TraceID olarak kullanıyoruz
+			traceID := currentSession.SessionID 
+
+			// LLM Çağrısı (Streaming) - traceID eklendi
+			tokensChan, err := s.llmClient.Generate(ctx, traceID, currentSession.History, userText)
 			if err != nil {
-				s.log.Error().Err(err).Msg("LLM çağrısı başarısız")
-				// Hata durumunda istemciye bildirilebilir
+				s.log.Error().Err(err).Str("trace_id", traceID).Msg("LLM çağrısı başarısız")
 				return err
 			}
 

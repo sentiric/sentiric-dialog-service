@@ -8,6 +8,13 @@ grpcurl -plaintext -d @ localhost:12061 sentiric.dialog.v1.DialogService/StreamC
 EOM
 ```
 
+# 1. Klasörde olduğunuzdan emin olun
+cd ~/sentiric/sentiric-dialog-service
+
+# 2. Yeniden derle ve başlat (Entegrasyon dosyası ile)
+docker compose -f docker-compose.integration.yml up -d --build
+
+
 secure integratio test
 ```bash
 docker run --rm -i \
@@ -19,8 +26,8 @@ docker run --rm -i \
   -cert /certs/dialog-service-chain.crt \
   -key /certs/dialog-service.key \
   localhost:12061 sentiric.dialog.v1.DialogService/StreamConversation <<EOM
-{"config": {"session_id": "real-integration-test-3", "user_id": "admin"}}
-{"text_input": "Merhaba, kendini tanıtır mısın?"}
+{"config": {"session_id": "TITAN-TEST-001", "user_id": "architect"}}
+{"text_input": "Merhaba, sistem mimarisi hakkında ne düşünüyorsun?"}
 {"is_final_input": true}
 EOM
 ```
