@@ -1,49 +1,41 @@
-# 🗺️ Sentiric Dialog Service - Mantık ve Akış Mimarisi
+# 🧠 Mantık Mimarisi
 
-**Stratejik Rol:** Bir çağrı oturumunun (veya kanal oturumunun) tüm diyalog akışını, durumunu ve LLM/Knowledge Service'ten gelen bilgiyi koordine eden durum makinesi yöneticisi.
+## 1. Akış Diyagramı (Streaming Loop)
 
----
-
-## 1. Temel Akış: Durum Yönetimi ve LLM Etkileşimi
-
-Bu servis, gelen kullanıcı girdisini (STT'den gelen metin) işler, konuşma geçmişini günceller ve LLM'den bir sonraki yanıtı alarak `agent-service`'e geri gönderir.
+`StreamConversation` RPC metodu şu döngüyü işletir:
 
 ```mermaid
-graph TD
-    A[Agent Service] -- gRPC: ProcessUserInput(text, context) --> B(Dialog Service)
+sequenceDiagram
+    participant User as Client (Telephony/Web)
+    participant Dialog as Dialog Service
+    participant Redis as State Store
+    participant LLM as LLM Gateway
+
+    User->>Dialog: Config {session_id: "123"}
+    Dialog->>Redis: GET session:123
+    Redis-->>Dialog: {history: [...]}
     
-    B --> C{State Management / History Update};
+    loop Streaming Audio/Text
+        User->>Dialog: "Mer" -> "Merha" -> "Merhaba"
+        Note over Dialog: Bufferlama
+        User->>Dialog: IsFinalInput: true
+    end
+
+    Dialog->>Dialog: History += "Merhaba"
+    Dialog->>LLM: GenerateStream(history, prompt="Merhaba") (mTLS + TraceID)
     
-    C --> D[LLM / Knowledge Query Service];
-    D --> E[LLM Gateway Service];
-    
-    E -- API: Generate(prompt) --> LLM[Uzman LLM Motoru];
-    LLM -- Response --> E;
-    
-    E --> B;
-    
-    Note over B: Karar verir (Play Audio, Transfer, Terminate)
-    B -- gRPC: DialogResponse(audio_uri, next_action) --> A;
+    loop Token Streaming
+        LLM-->>Dialog: "Se"
+        Dialog-->>User: "Se"
+        LLM-->>Dialog: "lam"
+        Dialog-->>User: "lam"
+    end
+
+    Dialog->>Dialog: History += "Selam"
+    Dialog->>Redis: SET session:123 (Updated History)
 ```
 
-## 2. Durum Makinesi (Basitleştirilmiş)
+## 2. Güvenlik ve Gözlemlenebilirlik
 
-```mermaid
-stateDiagram-v2
-    direction LR
-    Unidentified: Kullanıcı kimliği belirlenmemiş
-    Welcome: Karşılama anonsu bekleniyor
-    Listening: Kullanıcı girdisi bekleniyor
-    Processing: LLM/RAG sorgulanıyor
-    Completed: Görev tamamlandı
-    Terminated: Çağrı sonlandırıldı
-
-    [*] --> Unidentified : Yeni Çağrı
-    Unidentified --> Welcome : User Identified
-    Welcome --> Listening : PlayAudio Complete
-    Listening --> Processing : User Input Received (Speech)
-    Processing --> Listening : LLM Response (Ask again)
-    Processing --> Completed : LLM Response (Success)
-    Completed --> Terminated : Action: TERMINATE_CALL
-    Listening --> Terminated : Action: TERMINATE_CALL / Max Failures
-```
+*   **mTLS:** `internal/clients/llm/client.go` içinde Client Certificate yüklenir. Gateway'e bağlanırken bu sertifika sunulur.
+*   **Trace ID:** İstek ile gelen `session_id`, `x-trace-id` header'ı olarak LLM Gateway'e ve oradan Llama Service'e kadar taşınır. Bu sayede loglarda `[TraceID: xyz]` takibi yapılabilir.

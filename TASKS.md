@@ -7,8 +7,16 @@ Bu servisin mevcut ve gelecekteki tüm geliştirme görevleri, platformun merkez
 ---
 Bu belge, servise özel, çok küçük ve acil görevler için geçici bir not defteri olarak kullanılabilir.
 
-## Faz 1: Minimal İşlevsellik (INFRA-02)
-- [x] Temel Go projesi ve Dockerfile oluşturuldu.
-- [x] gRPC sunucusu iskeleti (`StartDialog`, `ProcessUserInput`) eklendi.
-- [ ] Redis ve Agent Service için gRPC istemci bağlantıları kurulacak. (ORCH-01)
-- [ ] Temel diyalog akışını simüle eden basit bir durum makinesi implemente edilecek. (ORCH-02)
+```markdown
+# ✅ Tamamlanan Görevler
+- [x] Proje iskeleti ve Dockerfile (Golang 1.24)
+- [x] Redis entegrasyonu ve State Manager
+- [x] `StreamConversation` gRPC implementasyonu
+- [x] LLM Gateway Client (mTLS destekli)
+- [x] Trace ID Propagation
+- [x] Mock LLM modu
+
+# 🔜 Sırada
+- [ ] RAG (Knowledge Base) Entegrasyonu
+- [ ] Telephony Action Service entegrasyon testleri
+```

@@ -1,21 +1,22 @@
-## Test
-insecure test
+# 🧪 Test Prosedürleri
+
+Servisi test etmek için `grpcurl` ve Docker kullanıyoruz.
+
+## 1. Mock Testi (Geliştirici Modu)
+`docker-compose.dev.yml` çalışırken:
+
 ```bash
-grpcurl -plaintext -d @ localhost:12061 sentiric.dialog.v1.DialogService/StreamConversation <<EOM
-{"config": {"session_id": "test-session-1", "user_id": "tester"}}
-{"text_input": "Merhaba Sentiric"}
+docker run --rm -i --network host fullstorydev/grpcurl -plaintext -d @ localhost:12061 sentiric.dialog.v1.DialogService/StreamConversation <<EOM
+{"config": {"session_id": "mock-test", "user_id": "dev"}}
+{"text_input": "Merhaba"}
 {"is_final_input": true}
 EOM
 ```
+*Beklenen:* "MOCK: 'Merhaba' dediniz..."
 
-# 1. Klasörde olduğunuzdan emin olun
-cd ~/sentiric/sentiric-dialog-service
+## 2. Gerçek Zeka Testi (Entegrasyon Modu)
+`docker-compose.integration.yml` çalışırken (Sertifikalarla):
 
-# 2. Yeniden derle ve başlat (Entegrasyon dosyası ile)
-docker compose -f docker-compose.integration.yml up -d --build
-
-
-secure integratio test
 ```bash
 docker run --rm -i \
   --network host \
@@ -26,8 +27,9 @@ docker run --rm -i \
   -cert /certs/dialog-service-chain.crt \
   -key /certs/dialog-service.key \
   localhost:12061 sentiric.dialog.v1.DialogService/StreamConversation <<EOM
-{"config": {"session_id": "TITAN-TEST-001", "user_id": "architect"}}
-{"text_input": "Merhaba, sistem mimarisi hakkında ne düşünüyorsun?"}
+{"config": {"session_id": "real-test-1", "user_id": "admin"}}
+{"text_input": "Merhaba, nasılsın?"}
 {"is_final_input": true}
 EOM
 ```
+*Beklenen:* Llama modelinden gelen anlamlı Türkçe cevap.
