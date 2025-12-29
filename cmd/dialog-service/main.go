@@ -9,7 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	// "github.com/rs/zerolog" <-- BU SATIR SİLİNDİ
 	dialogv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialog/v1"
 	"github.com/sentiric/sentiric-dialog-service/internal/clients/llm"
 	"github.com/sentiric/sentiric-dialog-service/internal/config"
@@ -32,7 +31,6 @@ func main() {
 		os.Exit(1)
 	}
 	
-	// logger.New bize zerolog.Logger döner, ancak bu dosyada "zerolog" paket adına ihtiyacımız yok.
 	log := logger.New("dialog-service", cfg.Env, cfg.LogLevel)
 	log.Info().Str("version", ServiceVersion).Msg("Servis başlatılıyor...")
 
@@ -50,7 +48,14 @@ func main() {
 		log.Info().Msg("🎭 MOCK LLM Modu Aktif")
 		llmClient = llm.NewMockClient()
 	} else {
-		llmClient, err = llm.NewGatewayClient(cfg.LLMGatewayURL, log)
+		// DÜZELTME: Config'den gelen sertifika yolları buraya eklendi
+		llmClient, err = llm.NewGatewayClient(
+			cfg.LLMGatewayURL, 
+			cfg.CertPath, 
+			cfg.KeyPath, 
+			cfg.CaPath, 
+			log,
+		)
 		if err != nil {
 			log.Fatal().Err(err).Msg("LLM Gateway bağlantı hatası")
 		}
@@ -63,7 +68,6 @@ func main() {
 	dialogv1.RegisterDialogServiceServer(grpcServer, dialogSvc)
 
 	// 4. HTTP Sunucusu (Health Check İçin)
-	// DefaultServeMux kullanarak /health endpoint'ini kaydediyoruz
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
@@ -71,12 +75,9 @@ func main() {
 
 	httpServer := &http.Server{
 		Addr: fmt.Sprintf(":%s", cfg.HttpPort),
-		// Handler belirtmezsek DefaultServeMux kullanılır
 	}
 
 	// 5. Sunucuları Başlat (Async)
-	
-	// gRPC Başlat
 	go func() {
 		log.Info().Str("port", cfg.GRPCPort).Msg("gRPC sunucusu dinleniyor")
 		if err := server.Start(grpcServer, cfg.GRPCPort); err != nil {
@@ -84,7 +85,6 @@ func main() {
 		}
 	}()
 
-	// HTTP Başlat
 	go func() {
 		log.Info().Str("port", cfg.HttpPort).Msg("HTTP sunucusu dinleniyor")
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -92,14 +92,13 @@ func main() {
 		}
 	}()
 
-	// 6. Graceful Shutdown (Zarif Kapanış)
+	// 6. Graceful Shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Warn().Msg("Kapatma sinyali alındı...")
 
-	// HTTP Sunucusunu Kapat
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	
@@ -107,7 +106,6 @@ func main() {
 		log.Error().Err(err).Msg("HTTP sunucusu kapatılırken hata oluştu")
 	}
 
-	// gRPC Sunucusunu Kapat
 	server.Stop(grpcServer)
 	
 	log.Info().Msg("Servis başarıyla kapatıldı.")

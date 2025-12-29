@@ -161,11 +161,6 @@ services:
     networks:
       sentiric-net:
         ipv4_address: 10.88.60.7
-
-    ports:
-      - "16070:16070"
-      - "16071:16071"
-
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:16070/health" ]
 
@@ -177,10 +172,6 @@ services:
   dialog-service:
     <<: *common-settings
     image: ghcr.io/sentiric/sentiric-dialog-service:${TAG:-latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
-    # env_file: [ "${ENV_FILE_PATH:-.env.generated}" ]
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
