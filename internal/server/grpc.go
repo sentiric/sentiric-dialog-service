@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/reflection" // <-- YENİ EKLENDİ
 )
 
 func NewGrpcServer(certPath, keyPath, caPath string, log zerolog.Logger) *grpc.Server {
@@ -28,7 +29,14 @@ func NewGrpcServer(certPath, keyPath, caPath string, log zerolog.Logger) *grpc.S
 		log.Warn().Msg("⚠️ TLS yolları boş, INSECURE modda başlatılıyor")
 	}
 
-	return grpc.NewServer(opts...)
+	server := grpc.NewServer(opts...)
+	
+	// Reflection servisini kaydet (grpcurl vb. araçlar için)
+	// Sadece development ortamında değil, her zaman açık olması bu aşamada debug için yararlıdır.
+	reflection.Register(server) 
+	log.Info().Msg("🔍 gRPC Reflection Servisi Aktif")
+
+	return server
 }
 
 func Start(grpcServer *grpc.Server, port string) error {
@@ -51,7 +59,7 @@ func loadServerTLS(certPath, keyPath, caPath string) (credentials.TransportCrede
 
 	config := &tls.Config{
 		Certificates: []tls.Certificate{certificate},
-		ClientAuth:   tls.NoClientCert, // İsteğe bağlı (mTLS zorunluysa RequireAndVerifyClientCert)
+		ClientAuth:   tls.NoClientCert, 
 	}
 
 	if caPath != "" {

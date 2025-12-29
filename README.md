@@ -9,3 +9,13 @@ Platformun kanaldan bağımsız (Web, Mobil, Telefon) **konuşma beynidir.**
 
 ## 🔌 API
 - `StreamConversation` (gRPC Bi-directional Stream)
+
+## Test
+insecure test
+```bash
+grpcurl -plaintext -d @ localhost:12061 sentiric.dialog.v1.DialogService/StreamConversation <<EOM
+{"config": {"session_id": "test-session-1", "user_id": "tester"}}
+{"text_input": "Merhaba Sentiric"}
+{"is_final_input": true}
+EOM
+```

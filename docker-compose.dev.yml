@@ -65,9 +65,10 @@ services:
       - DIALOG_SERVICE_GRPC_PORT=12061
       - MOCK_LLM=true # Mock modunda test et
       - env=development
-      - LOG_LEVEL=info
-      - DIALOG_SERVICE_CERT_PATH=/sentiric-certificates/certs/dialog-service-chain.crt
-      - DIALOG_SERVICE_KEY_PATH=/sentiric-certificates/certs/dialog-service.key
+      - LOG_LEVEL=debug
+      # - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      # - DIALOG_SERVICE_CERT_PATH=/sentiric-certificates/certs/dialog-service-chain.crt
+      # - DIALOG_SERVICE_KEY_PATH=/sentiric-certificates/certs/dialog-service.key
       - REDIS_URL=redis:6379
       - LLM_GATEWAY_SERVICE_TARGET=llm-gateway-service:16021
     ports:
