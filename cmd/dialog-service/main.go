@@ -1,4 +1,3 @@
-// sentiric-dialog-service/cmd/dialog-service/main.go
 package main
 
 import (
@@ -10,127 +9,106 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rs/zerolog"
+	// "github.com/rs/zerolog" <-- BU SATIR SİLİNDİ
+	dialogv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialog/v1"
+	"github.com/sentiric/sentiric-dialog-service/internal/clients/llm"
 	"github.com/sentiric/sentiric-dialog-service/internal/config"
+	"github.com/sentiric/sentiric-dialog-service/internal/database"
 	"github.com/sentiric/sentiric-dialog-service/internal/logger"
 	"github.com/sentiric/sentiric-dialog-service/internal/server"
-
-	dialogv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialog/v1"
+	"github.com/sentiric/sentiric-dialog-service/internal/service"
+	"github.com/sentiric/sentiric-dialog-service/internal/state"
 )
 
 var (
-	ServiceVersion string
-	GitCommit      string
-	BuildDate      string
+	ServiceVersion = "1.0.0"
 )
 
-const serviceName = "dialog-service"
-
 func main() {
+	// 1. Config Yükle
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Kritik Hata: Konfigürasyon yüklenemedi: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Config yüklenemedi: %v\n", err)
 		os.Exit(1)
 	}
+	
+	// logger.New bize zerolog.Logger döner, ancak bu dosyada "zerolog" paket adına ihtiyacımız yok.
+	log := logger.New("dialog-service", cfg.Env, cfg.LogLevel)
+	log.Info().Str("version", ServiceVersion).Msg("Servis başlatılıyor...")
 
-	log := logger.New(serviceName, cfg.Env, cfg.LogLevel)
+	// 2. Bağımlılıklar (Redis & LLM)
+	redisClient, err := database.NewRedisClient(cfg.RedisURL, log)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Redis bağlantısı başarısız")
+	}
+	defer redisClient.Close()
 
-	log.Info().
-		Str("version", ServiceVersion).
-		Str("commit", GitCommit).
-		Str("build_date", BuildDate).
-		Str("profile", cfg.Env).
-		Msg("🚀 Sentiric Dialog Service başlatılıyor...")
+	stateManager := state.NewManager(redisClient.Client, log)
 
-	// HTTP ve gRPC sunucularını oluştur
+	var llmClient llm.Client
+	if cfg.MockLLM {
+		log.Info().Msg("🎭 MOCK LLM Modu Aktif")
+		llmClient = llm.NewMockClient()
+	} else {
+		llmClient, err = llm.NewGatewayClient(cfg.LLMGatewayURL, log)
+		if err != nil {
+			log.Fatal().Err(err).Msg("LLM Gateway bağlantı hatası")
+		}
+	}
+	defer llmClient.Close()
+
+	// 3. gRPC Servisi ve Sunucusu
+	dialogSvc := service.NewDialogService(stateManager, llmClient, log)
 	grpcServer := server.NewGrpcServer(cfg.CertPath, cfg.KeyPath, cfg.CaPath, log)
-	httpServer := startHttpServer(cfg.HttpPort, log)
+	dialogv1.RegisterDialogServiceServer(grpcServer, dialogSvc)
 
-	// gRPC Handler'ı kaydet
-	dialogv1.RegisterDialogServiceServer(grpcServer, &dialogHandler{})
+	// 4. HTTP Sunucusu (Health Check İçin)
+	// DefaultServeMux kullanarak /health endpoint'ini kaydediyoruz
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
 
-	// gRPC sunucusunu bir goroutine'de başlat
+	httpServer := &http.Server{
+		Addr: fmt.Sprintf(":%s", cfg.HttpPort),
+		// Handler belirtmezsek DefaultServeMux kullanılır
+	}
+
+	// 5. Sunucuları Başlat (Async)
+	
+	// gRPC Başlat
 	go func() {
-		log.Info().Str("port", cfg.GRPCPort).Msg("gRPC sunucusu dinleniyor...")
-		if err := server.Start(grpcServer, cfg.GRPCPort); err != nil && err.Error() != "http: Server closed" {
-			log.Error().Err(err).Msg("gRPC sunucusu başlatılamadı")
+		log.Info().Str("port", cfg.GRPCPort).Msg("gRPC sunucusu dinleniyor")
+		if err := server.Start(grpcServer, cfg.GRPCPort); err != nil {
+			log.Fatal().Err(err).Msg("gRPC sunucusu hatası")
 		}
 	}()
 
-	// Graceful shutdown için sinyal dinleyicisi
+	// HTTP Başlat
+	go func() {
+		log.Info().Str("port", cfg.HttpPort).Msg("HTTP sunucusu dinleniyor")
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("HTTP sunucusu hatası")
+		}
+	}()
+
+	// 6. Graceful Shutdown (Zarif Kapanış)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Warn().Msg("Kapatma sinyali alındı, servisler durduruluyor...")
+	log.Warn().Msg("Kapatma sinyali alındı...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// HTTP Sunucusunu Kapat
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	server.Stop(grpcServer)
-	log.Info().Msg("gRPC sunucusu durduruldu.")
-
+	
 	if err := httpServer.Shutdown(ctx); err != nil {
-		log.Error().Err(err).Msg("HTTP sunucusu düzgün kapatılamadı.")
-	} else {
-		log.Info().Msg("HTTP sunucusu durduruldu.")
+		log.Error().Err(err).Msg("HTTP sunucusu kapatılırken hata oluştu")
 	}
 
-	log.Info().Msg("Servis başarıyla durduruldu.")
-}
-
-func startHttpServer(port string, log zerolog.Logger) *http.Server {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status": "ok"}`)
-	})
-
-	addr := fmt.Sprintf(":%s", port)
-	srv := &http.Server{Addr: addr, Handler: mux}
-
-	go func() {
-		log.Info().Str("port", port).Msg("HTTP sunucusu (health) dinleniyor")
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal().Err(err).Msg("HTTP sunucusu başlatılamadı")
-		}
-	}()
-	return srv
-}
-
-// =================================================================
-// GRPC HANDLER IMPLEMENTASYONU (Placeholder)
-// =================================================================
-
-type dialogHandler struct {
-	dialogv1.UnimplementedDialogServiceServer
-}
-
-func (*dialogHandler) StartDialog(ctx context.Context, req *dialogv1.StartDialogRequest) (*dialogv1.StartDialogResponse, error) {
-	log := zerolog.Ctx(ctx).With().Str("rpc", "StartDialog").Logger()
-	log.Info().Msg("StartDialog isteği alındı (Placeholder)")
-
-	return &dialogv1.StartDialogResponse{
-		ResponseText:   "Dialog başlatıldı. İlk yanıtınız bekleniyor.",
-		NextAction:     "WAIT_FOR_INPUT",
-		UpdatedContext: req.Context,
-	}, nil
-}
-
-func (*dialogHandler) ProcessUserInput(ctx context.Context, req *dialogv1.ProcessUserInputRequest) (*dialogv1.ProcessUserInputResponse, error) {
-	log := zerolog.Ctx(ctx).With().Str("rpc", "ProcessUserInput").Str("call_id", req.GetCallId()).Logger()
-	log.Info().Str("input", req.GetText()).Msg("ProcessUserInput isteği alındı (Placeholder)")
-
-	if req.GetText() == "exit" {
-		return &dialogv1.ProcessUserInputResponse{
-			ResponseText: "Güle güle.",
-			NextAction:   "TERMINATE_CALL",
-		}, nil
-	}
-
-	return &dialogv1.ProcessUserInputResponse{
-		ResponseText: fmt.Sprintf("Anladım: %s. Ama şu an sadece yer tutucuyum.", req.GetText()),
-		NextAction:   "WAIT_FOR_INPUT",
-	}, nil
+	// gRPC Sunucusunu Kapat
+	server.Stop(grpcServer)
+	
+	log.Info().Msg("Servis başarıyla kapatıldı.")
 }

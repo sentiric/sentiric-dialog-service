@@ -1,0 +1,80 @@
+name: sentiric
+
+x-common-settings: &common-settings
+  dns:
+    - ${DISCOVERY_SERVICE_IPV4_ADDRESS:-10.88.5.1}
+    - ${PRIMARY_DNS:-8.8.8.8}
+    - ${SECONDARY_DNS:-1.1.1.1}
+  dns_search:
+    - ${DISCOVERY_DNS_SEARCH_DOMAIN:-service.sentiric.cloud}
+  restart: always
+
+networks:
+  sentiric-net:
+    driver: bridge
+    name: sentiric-net
+    ipam:
+      config:
+        - subnet: ${NETWORK_SUBNET:-10.88.0.0/16}
+          gateway: ${NETWORK_GATEWAY:-10.88.0.1}
+
+volumes:
+  # =============================================================
+  # KATEGORİ 1: TEMEL ALTYAPI (INFRASTRUCTURE)
+  # Platformun temel yapı taşları.
+  # =============================================================
+  # [infra]: Temel Altyapı (Infrastructure Layer)
+  # --------------------------------------------------
+  infra-redis-data:
+
+
+services:
+
+  # =============================================================
+  # KATEGORİ 1: TEMEL ALTYAPI (INFRASTRUCTURE)
+  # Platformun temel yapı taşları.
+  # =============================================================
+  redis:
+    <<: *common-settings
+    image: ghcr.io/sentiric/sentiric-redis:${TAG:-latest}
+    volumes:
+      - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
+      - infra-redis-data:/data
+    networks:
+      sentiric-net:
+        ipv4_address: ${REDIS_IPV4_ADDRESS:-10.88.10.3}
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+
+  # =============================================================
+  # Kategori 4: Orkestrasyon ve Çekirdek İş Mantığı 
+  # (Core Logic Layer)
+  # =============================================================
+
+  dialog-service:
+    <<: *common-settings
+    image: ghcr.io/sentiric/sentiric-dialog-service:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # env_file: [ "${ENV_FILE_PATH:-.env.generated}" ]
+    volumes:
+      - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
+    environment:
+      - DIALOG_SERVICE_HTTP_PORT=12060
+      - DIALOG_SERVICE_GRPC_PORT=12061
+      - MOCK_LLM=true # Mock modunda test et
+      - env=development
+      - LOG_LEVEL=info
+      - DIALOG_SERVICE_CERT_PATH=/sentiric-certificates/certs/dialog-service-chain.crt
+      - DIALOG_SERVICE_KEY_PATH=/sentiric-certificates/certs/dialog-service.key
+      - REDIS_URL=redis:6379
+      - LLM_GATEWAY_SERVICE_TARGET=llm-gateway-service:16021
+    ports:
+      - "${DIALOG_SERVICE_HTTP_PORT:-12060}:${DIALOG_SERVICE_HTTP_PORT:-12060}"
+      - "${DIALOG_SERVICE_GRPC_PORT:-12061}:${DIALOG_SERVICE_GRPC_PORT:-12061}"
+    networks:
+      sentiric-net:
+        ipv4_address: ${DIALOG_SERVICE_IPV4_ADDRESS:-10.88.20.6}
+    depends_on:
+      - redis

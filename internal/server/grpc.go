@@ -1,29 +1,36 @@
-// sentiric-dialog-service/internal/server/grpc.go
 package server
 
 import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"net"
+	"os"
 
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
-// NewGrpcServer, mTLS yapılandırması ile yeni bir gRPC sunucusu oluşturur.
 func NewGrpcServer(certPath, keyPath, caPath string, log zerolog.Logger) *grpc.Server {
-	creds, err := loadServerTLS(certPath, keyPath, caPath, log)
-	if err != nil {
-		log.Fatal().Err(err).Msg("TLS kimlik bilgileri yüklenemedi")
+	opts := []grpc.ServerOption{}
+
+	// mTLS Kontrolü: Dosyalar varsa secure başlat, yoksa insecure
+	if certPath != "" && keyPath != "" {
+		creds, err := loadServerTLS(certPath, keyPath, caPath)
+		if err != nil {
+			log.Warn().Err(err).Msg("TLS yüklenemedi, INSECURE moda geçiliyor")
+		} else {
+			opts = append(opts, grpc.Creds(creds))
+			log.Info().Msg("🔐 mTLS Aktif")
+		}
+	} else {
+		log.Warn().Msg("⚠️ TLS yolları boş, INSECURE modda başlatılıyor")
 	}
 
-	return grpc.NewServer(grpc.Creds(creds))
+	return grpc.NewServer(opts...)
 }
 
-// Start, verilen gRPC sunucusunu belirtilen portta dinlemeye başlar.
 func Start(grpcServer *grpc.Server, port string) error {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
@@ -32,28 +39,31 @@ func Start(grpcServer *grpc.Server, port string) error {
 	return grpcServer.Serve(listener)
 }
 
-// Stop, gRPC sunucusunu zarif bir şekilde durdurur.
 func Stop(grpcServer *grpc.Server) {
 	grpcServer.GracefulStop()
 }
 
-func loadServerTLS(certPath, keyPath, caPath string, log zerolog.Logger) (credentials.TransportCredentials, error) {
+func loadServerTLS(certPath, keyPath, caPath string) (credentials.TransportCredentials, error) {
 	certificate, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		return nil, fmt.Errorf("sunucu sertifikası yüklenemedi: %w", err)
+		return nil, err
 	}
-	caCert, err := ioutil.ReadFile(caPath)
-	if err != nil {
-		return nil, fmt.Errorf("CA sertifikası okunamadı: %w", err)
-	}
-	caPool := x509.NewCertPool()
-	if !caPool.AppendCertsFromPEM(caCert) {
-		return nil, fmt.Errorf("CA sertifikası havuza eklenemedi")
-	}
-	tlsConfig := &tls.Config{
+
+	config := &tls.Config{
 		Certificates: []tls.Certificate{certificate},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    caPool,
+		ClientAuth:   tls.NoClientCert, // İsteğe bağlı (mTLS zorunluysa RequireAndVerifyClientCert)
 	}
-	return credentials.NewTLS(tlsConfig), nil
+
+	if caPath != "" {
+		caCert, err := os.ReadFile(caPath)
+		if err == nil {
+			caPool := x509.NewCertPool()
+			if caPool.AppendCertsFromPEM(caCert) {
+				config.ClientCAs = caPool
+				config.ClientAuth = tls.RequireAndVerifyClientCert
+			}
+		}
+	}
+
+	return credentials.NewTLS(config), nil
 }
