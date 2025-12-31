@@ -79,7 +79,7 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			if userText == "" {
 				continue 
 			}
-			s.log.Info().Str("input", userText).Msg("Kullanıcı girdisi tamamlandı, LLM'e gidiliyor")
+			s.log.Info().Str("input", userText).Msg("User input complete, sending to LLM") // İngilizce
 
 			// Geçmişe ekle
 			s.stateManager.AddTurn(currentSession, "user", userText)
@@ -88,10 +88,15 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			// SessionID'yi TraceID olarak kullanıyoruz
 			traceID := currentSession.SessionID 
 
-			// LLM Çağrısı (Streaming) - traceID eklendi
+			// LLM Çağrısı
 			tokensChan, err := s.llmClient.Generate(ctx, traceID, currentSession.History, userText)
 			if err != nil {
-				s.log.Error().Err(err).Str("trace_id", traceID).Msg("LLM çağrısı başarısız")
+                // [FIX] Canceled hatasını ayıkla
+                if status.Code(err) == codes.Canceled {
+                    s.log.Warn().Msg("LLM stream canceled by client")
+                } else {
+				    s.log.Error().Err(err).Str("trace_id", traceID).Msg("LLM call failed")
+                }
 				return err
 			}
 
