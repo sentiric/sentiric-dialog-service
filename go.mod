@@ -6,7 +6,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.5.1
 	github.com/rs/zerolog v1.34.0
-	github.com/sentiric/sentiric-contracts v1.13.0
+	github.com/sentiric/sentiric-contracts v1.13.2
 	google.golang.org/grpc v1.75.1
 )
 

@@ -172,6 +172,9 @@ services:
   dialog-service:
     <<: *common-settings
     image: ghcr.io/sentiric/sentiric-dialog-service:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile    
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:

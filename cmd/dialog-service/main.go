@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	ServiceVersion = "1.0.0"
+	ServiceVersion = "1.0.1"
 )
 
 func main() {
