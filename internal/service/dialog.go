@@ -9,6 +9,7 @@ import (
 	"github.com/sentiric/sentiric-dialog-service/internal/clients/llm"
 	"github.com/sentiric/sentiric-dialog-service/internal/state"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -28,21 +29,41 @@ func NewDialogService(sm *state.Manager, lc llm.Client, log zerolog.Logger) *Dia
 }
 
 // StreamConversation: Bi-directional streaming RPC
+// Kullanıcıdan parça parça gelen metni birleştirir, sonlandığında LLM'e sorar ve cevabı parça parça döner.
 func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamConversationServer) error {
 	ctx := stream.Context()
+	
+	// Trace ID Extraction
+	traceID := "unknown"
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if ids := md.Get("x-trace-id"); len(ids) > 0 {
+			traceID = ids[0]
+		}
+	}
+	
+	l := s.log.With().Str("trace_id", traceID).Logger()
+	l.Info().Msg("Yeni dialog stream başlatıldı")
+
 	var currentSession *state.Session
 	var currentInputBuffer strings.Builder
-
-	s.log.Info().Msg("Yeni konuşma akışı başladı")
+	
+	// LLM İstemcisi bağlantı kontrolü
+	// (Gerekirse burada yapılabilir ama client katmanı zaten lazy connection yönetiyor)
 
 	for {
 		// 1. İstemciden Mesaj Al
 		in, err := stream.Recv()
 		if err == io.EOF {
+			l.Info().Msg("İstemci stream'i kapattı (EOF)")
 			return nil
 		}
 		if err != nil {
-			s.log.Error().Err(err).Msg("Stream alma hatası")
+			// gRPC "Canceled" hatası normal bir bağlantı kopması olabilir
+			if status.Code(err) == codes.Canceled {
+				l.Warn().Msg("Stream istemci tarafından iptal edildi")
+				return nil
+			}
+			l.Error().Err(err).Msg("Stream alma hatası")
 			return err
 		}
 
@@ -54,53 +75,53 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			sessionID := payload.Config.SessionId
 			userID := payload.Config.UserId
 			
+			// Logger'ı session bilgisiyle zenginleştir
+			l = l.With().Str("session_id", sessionID).Str("user_id", userID).Logger()
+			
 			sess, err := s.stateManager.GetSession(ctx, sessionID)
 			if err != nil {
-				return status.Errorf(codes.Internal, "Oturum yüklenemedi: %v", err)
+				l.Error().Err(err).Msg("Oturum yüklenirken Redis hatası")
+				return status.Errorf(codes.Internal, "Oturum yüklenemedi")
 			}
 			sess.UserID = userID
 			currentSession = sess
-			s.log.Info().Str("session_id", sessionID).Msg("Oturum yüklendi/oluşturuldu")
+			l.Info().Int("history_len", len(sess.History)).Msg("Oturum bağlamı yüklendi")
 
 		// B. Metin Girdisi (STT'den parça parça gelir)
 		case *dialogv1.StreamConversationRequest_TextInput:
 			if currentSession == nil {
+				l.Warn().Msg("Config gelmeden metin verisi alındı")
 				return status.Error(codes.FailedPrecondition, "Önce ConversationConfig gönderilmeli")
 			}
 			currentInputBuffer.WriteString(payload.TextInput)
 
-		// C. Girdi Sonu Sinyali (Kullanıcı sustu)
+		// C. Girdi Sonu Sinyali (Kullanıcı sustu, LLM sırası)
 		case *dialogv1.StreamConversationRequest_IsFinalInput:
 			if !payload.IsFinalInput {
 				continue
 			}
 			
-			userText := currentInputBuffer.String()
+			userText := strings.TrimSpace(currentInputBuffer.String())
 			if userText == "" {
+				l.Debug().Msg("Boş girdi alındı, işlem atlanıyor")
 				continue 
 			}
-			s.log.Info().Str("input", userText).Msg("User input complete, sending to LLM") // İngilizce
+			
+			l.Info().Str("input", userText).Msg("Kullanıcı girdisi tamamlandı, LLM'e gönderiliyor")
 
-			// Geçmişe ekle
+			// 1. Kullanıcı girdisini geçmişe ekle (Bellekte)
 			s.stateManager.AddTurn(currentSession, "user", userText)
 			currentInputBuffer.Reset()
 
-			// SessionID'yi TraceID olarak kullanıyoruz
-			traceID := currentSession.SessionID 
-
-			// LLM Çağrısı
+			// 2. LLM Çağrısı (Stream)
+			// TraceID'yi alt servise iletiyoruz
 			tokensChan, err := s.llmClient.Generate(ctx, traceID, currentSession.History, userText)
 			if err != nil {
-                // [FIX] Canceled hatasını ayıkla
-                if status.Code(err) == codes.Canceled {
-                    s.log.Warn().Msg("LLM stream canceled by client")
-                } else {
-				    s.log.Error().Err(err).Str("trace_id", traceID).Msg("LLM call failed")
-                }
-				return err
+				l.Error().Err(err).Msg("LLM servisine erişim hatası")
+				return status.Errorf(codes.Unavailable, "Yapay zeka servisi şu an yanıt veremiyor")
 			}
 
-			// LLM Yanıtını İstemciye Aktar (Token Token)
+			// 3. LLM Yanıtını İstemciye Aktar (Token Token)
 			var fullResponse strings.Builder
 			
 			for token := range tokensChan {
@@ -111,26 +132,30 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 					},
 				})
 				if err != nil {
+					l.Error().Err(err).Msg("Token istemciye gönderilemedi")
 					return err
 				}
 			}
 
-			// Yanıt bitti sinyali
+			// 4. Yanıt bitti sinyali
 			err = stream.Send(&dialogv1.StreamConversationResponse{
 				Payload: &dialogv1.StreamConversationResponse_IsFinalResponse{
 					IsFinalResponse: true,
 				},
 			})
 			if err != nil {
+				l.Error().Err(err).Msg("Final sinyali gönderilemedi")
 				return err
 			}
 
-			// AI Cevabını Geçmişe Kaydet
-			s.stateManager.AddTurn(currentSession, "assistant", fullResponse.String())
+			// 5. Asistan cevabını geçmişe ekle ve Redis'e kaydet
+			aiResponse := fullResponse.String()
+			s.stateManager.AddTurn(currentSession, "assistant", aiResponse)
 			
-			// Redis'i Güncelle
 			if err := s.stateManager.SaveSession(ctx, currentSession); err != nil {
-				s.log.Error().Err(err).Msg("Oturum kaydedilemedi")
+				l.Error().Err(err).Msg("Oturum durumu kaydedilemedi (Veri kaybı riski!)")
+			} else {
+				l.Info().Int("response_len", len(aiResponse)).Msg("Tur tamamlandı ve kaydedildi")
 			}
 		}
 	}

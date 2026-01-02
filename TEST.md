@@ -3,7 +3,7 @@
 Servisi test etmek için `grpcurl` ve Docker kullanıyoruz.
 
 ## 1. Mock Testi (Geliştirici Modu)
-`docker-compose.dev.yml` çalışırken:
+`docker-compose.yml` çalışırken:
 
 ```bash
 docker run --rm -i --network host fullstorydev/grpcurl -plaintext -d @ localhost:12061 sentiric.dialog.v1.DialogService/StreamConversation <<EOM
@@ -15,7 +15,7 @@ EOM
 *Beklenen:* "MOCK: 'Merhaba' dediniz..."
 
 ## 2. Gerçek Zeka Testi (Entegrasyon Modu)
-`docker-compose.integration.yml` çalışırken (Sertifikalarla):
+`docker-compose.yml` çalışırken (Sertifikalarla):
 
 ```bash
 docker run --rm -i \

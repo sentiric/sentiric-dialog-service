@@ -11,14 +11,15 @@ import (
 	llmv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/llm/v1"
 )
 
-// SessionTTL: 1 saat işlem yapılmazsa oturum silinir
+// SessionTTL: Oturum süresi 1 saat olarak belirlendi. Her işlemde yenilenir.
 const SessionTTL = 1 * time.Hour
 
 type Session struct {
 	SessionID string                    `json:"sessionId"`
 	UserID    string                    `json:"userId"`
 	History   []*llmv1.ConversationTurn `json:"history"`
-	Variables map[string]string         `json:"variables"`
+	// Gelecekteki genişlemeler için metadata alanı (örn: kullanıcının dili, tercihleri)
+	Metadata  map[string]string         `json:"metadata,omitempty"` 
 }
 
 type Manager struct {
@@ -38,18 +39,21 @@ func (m *Manager) GetSession(ctx context.Context, sessionID string) (*Session, e
 	val, err := m.redis.Get(ctx, key).Result()
 	
 	if err == redis.Nil {
-		// Yeni oturum
+		// Yeni oturum başlat
+		m.log.Debug().Str("session_id", sessionID).Msg("Redis'te oturum bulunamadı, yeni oluşturuluyor.")
 		return &Session{
 			SessionID: sessionID,
 			History:   make([]*llmv1.ConversationTurn, 0),
-			Variables: make(map[string]string),
+			Metadata:  make(map[string]string),
 		}, nil
 	} else if err != nil {
+		m.log.Error().Err(err).Str("session_id", sessionID).Msg("Redis okuma hatası")
 		return nil, err
 	}
 
 	var session Session
 	if err := json.Unmarshal([]byte(val), &session); err != nil {
+		m.log.Error().Err(err).Str("session_id", sessionID).Msg("Session JSON parse hatası")
 		return nil, err
 	}
 	return &session, nil
@@ -61,7 +65,15 @@ func (m *Manager) SaveSession(ctx context.Context, session *Session) error {
 	if err != nil {
 		return err
 	}
-	return m.redis.Set(ctx, key, data, SessionTTL).Err()
+	
+	// TTL'i her kayıtta yeniliyoruz
+	if err := m.redis.Set(ctx, key, data, SessionTTL).Err(); err != nil {
+		m.log.Error().Err(err).Str("session_id", session.SessionID).Msg("Redis yazma hatası")
+		return err
+	}
+	
+	m.log.Debug().Str("session_id", session.SessionID).Int("turns", len(session.History)).Msg("Oturum durumu kaydedildi.")
+	return nil
 }
 
 func (m *Manager) AddTurn(session *Session, role string, content string) {

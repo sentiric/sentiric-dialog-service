@@ -13,13 +13,8 @@ x-common-settings: &common-settings
       reservations:
         devices:
           - driver: nvidia
-            count: 1
+            count: all
             capabilities: [ gpu, compute, utility ]
-  healthcheck:
-    interval: 30s
-    timeout: 10s
-    retries: 10
-    start_period: 60m
 
 networks:
   sentiric-net:
@@ -47,8 +42,7 @@ volumes:
 services:
 
   # =============================================================
-  # KATEGORİ 1: TEMEL ALTYAPI (INFRASTRUCTURE)
-  # Platformun temel yapı taşları.
+  # INFRASTRUCTURE
   # =============================================================
   redis:
     <<: *common-settings
@@ -62,137 +56,123 @@ services:
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
 
-  # --- GATEWAY SERVİSLERİ ---
+  # =============================================================
+  # AI ENGINE LAYER (SERVERS)
+  # =============================================================
 
+  # --- LLM LLAMA (Server) ---
+  llm-llama-service:
+    <<: *common-settings
+    image: ghcr.io/sentiric/sentiric-llm-llama-service:latest-gpu
+    build:
+      context: ../sentiric-llm-llama-service
+      dockerfile: Dockerfile.gpu
+    volumes:
+      - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
+      - llm-llama-models:/models
+      - llm-llama-loras:/lora_adapters
+    environment:
+      - ENV=development
+      - LLM_LLAMA_SERVICE_LOG_LEVEL=info
+      - LLM_LLAMA_SERVICE_HOST=llm-llama-service
+      - LLM_LLAMA_SERVICE_HTTP_PORT=16070
+      - LLM_LLAMA_SERVICE_GRPC_PORT=16071
+      # Performance
+      - LLM_LLAMA_SERVICE_GPU_LAYERS=0
+      - LLM_LLAMA_SERVICE_CONTEXT_SIZE=1024
+      - LLM_LLAMA_SERVICE_KV_OFFLOAD=false
+      - LLM_LLAMA_SERVICE_USE_MMAP=false
+      - LLM_LLAMA_SERVICE_ENABLE_BATCHING=false
+      
+      # [SECURITY - mTLS ENABLED]
+      - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
+      - LLM_LLAMA_SERVICE_CERT_PATH=/sentiric-certificates/certs/llm-llama-service-chain.crt
+      - LLM_LLAMA_SERVICE_KEY_PATH=/sentiric-certificates/certs/llm-llama-service.key
+    networks:
+      sentiric-net:
+        ipv4_address: 10.88.60.7
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:16070/health" ]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+
+# =============================================================
+  # GATEWAY & LOGIC LAYER (CLIENTS)
+  # =============================================================
+
+  # --- LLM GATEWAY (Client -> LLM Llama) ---
   llm-gateway-service:
     <<: *common-settings
     image: ghcr.io/sentiric/sentiric-llm-gateway-service:latest
+    build:
+      context: ../sentiric-llm-gateway-service
+      dockerfile: Dockerfile
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
-      - LLM_GATEWAY_SERVICE_HOST=llm-gateway-service
-      - LLM_GATEWAY_SERVICE_LISTEN_ADDRESS=0.0.0.0
+      - ENV=development
+      - RUST_LOG=info,sentiric_llm_gateway=debug
       - LLM_GATEWAY_SERVICE_HTTP_PORT=16020
       - LLM_GATEWAY_SERVICE_GRPC_PORT=16021
-      - LLM_GATEWAY_SERVICE_METRICS_PORT=16022
-      - ENV=production
-      - RUST_LOG=info,sentiric_llm_gateway=debug
+      
+      # [FIX] URL şeması 'https' olmalı
       - LLM_LLAMA_SERVICE_GRPC_URL=https://llm-llama-service:16071
+
+      # [SECURITY - mTLS Client Config]
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
-      - LLM_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/llm-gateway-service.crt
+      - LLM_GATEWAY_SERVICE_CERT_PATH=/sentiric-certificates/certs/llm-gateway-service-chain.crt
       - LLM_GATEWAY_SERVICE_KEY_PATH=/sentiric-certificates/certs/llm-gateway-service.key
     networks:
       sentiric-net:
         ipv4_address: 10.88.60.2
     healthcheck:
       test: [ "CMD", "nc", "-z", "localhost", "16021" ]
+      interval: 10s
+      retries: 10
     depends_on:
       llm-llama-service:
         condition: service_healthy
 
-  # --- AI YETENEK SERVİSLERİ ---
-
-  llm-llama-service:
-    <<: *common-settings
-    image: ghcr.io/sentiric/sentiric-llm-llama-service:latest-gpu
-    volumes:
-      - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
-      - llm-llama-models:/models
-      - llm-llama-loras:/lora_adapters
-
-    environment:
-      # --- NETWORK ---
-      LLM_LLAMA_SERVICE_HOST: llm-llama-service
-      LLM_LLAMA_SERVICE_LISTEN_ADDRESS: 0.0.0.0
-      LLM_LLAMA_SERVICE_HTTP_PORT: 16070
-      LLM_LLAMA_SERVICE_GRPC_PORT: 16071
-      LLM_LLAMA_SERVICE_METRICS_PORT: 16072
-
-      # --- PERFORMANCE (ECO MODE) ---
-      NVIDIA_VISIBLE_DEVICES: all
-      # 4B model ~2.5GB tutar. 100 katman demek modelin tamamını GPU'ya yükle demektir.
-      # Context 2048 ile KV Cache ~0.4GB tutar. Toplam ~3GB VRAM harcar.
-      # Kalan 3GB VRAM, TTS ve STT servisleri için ayrılır.
-      LLM_LLAMA_SERVICE_GPU_LAYERS: 100
-      LLM_LLAMA_SERVICE_CONTEXT_SIZE: 2048
-      LLM_LLAMA_SERVICE_MAX_BATCH_SIZE: 1
-      LLM_LLAMA_SERVICE_THREADS: 4
-      LLM_LLAMA_SERVICE_DEFAULT_TEMPERATURE: 0.2
-      # --- INTELLIGENCE & ADAPTIVE LANGUAGE ---
-      LLM_LLAMA_SERVICE_DEFAULT_SYSTEM_PROMPT: |
-        Senin ismin 'Sentirik'. 
-
-        ### DAVRANIŞSAL PROTOKOLLER:
-        1. GÜLÜMSEYEN SES: Kelimelerin sıcak, yardımsever ve enerjik olsun.
-        2. EMPATİ VE PARTNERLİK: 'biz' dilini kullan.
-        3. POZİTİF DİL: "-me/-ma" eklerini ve "hayır/yapamayız" gibi kesin reddedişleri minimize et. Bunun yerine her zaman alternatif veya çözüm odaklı bir cümle kur.
-        4. L.A.S.T. YÖNTEMİ: Şikayetlerde önce dinle (onayla), durum için özür dile, çözümü sun ve teşekkür et.
-        5. AYNALAMA (MIRRORING): Kullanıcının hızına ve tonuna hafifçe uyum sağla ama profesyonelliğini koru.
-
-        ### İLETİŞİM KURALLARI:
-        - DİL: Türkiye Türkçesi.
-        - HİTAP: ismiyle hitap et (örn: " Bey", " Hanım").
-        - RAG: Sadece [BİLGİ] bloğundaki veriyi kullan. 
-        - Bilgi yoksa:  "Hemen kontrol ediyorum" diyerek nazikçe operatöre yönlendir.
-        - GÜVENLİK: Acil durumlarda vakit kaybetmeden 112'ye yönlendir.
-
-      LLM_LLAMA_SERVICE_DEFAULT_RAG_PROMPT: |
-        [BİLGİ]
-        {{rag_context}}
-        [BİLGİ SONU]
-
-        Yukarıdaki bağlamı kullanarak cevapla:
-        Soru: {{user_prompt}}
-
-      LLM_LLAMA_SERVICE_DEFAULT_RAG_PROMPT_LOW: |
-        [TALİMAT]: Cevap vermeden önce kısaca düşün. Düşüncelerini <think> etiketleri içine al.
-
-      LLM_LLAMA_SERVICE_DEFAULT_RAG_PROMPT_HIGH: |
-        [TALİMAT]: Bu karmaşık bir görev. Adım adım derinlemesine düşün. Analizini <think> etiketleri içine al.
-
-      # --- SECURITY ---
-      GRPC_TLS_CA_PATH: /sentiric-certificates/certs/ca.crt
-      LLM_LLAMA_SERVICE_CERT_PATH: /sentiric-certificates/certs/llm-llama-service-chain.crt
-      LLM_LLAMA_SERVICE_KEY_PATH: /sentiric-certificates/certs/llm-llama-service.key
-
-      # --- LOGGING ---
-      LLM_LLAMA_SERVICE_LOG_LEVEL: info
-
-    networks:
-      sentiric-net:
-        ipv4_address: 10.88.60.7
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:16070/health" ]
-
-  # =============================================================
-  # Kategori 4: Orkestrasyon ve Çekirdek İş Mantığı 
-  # (Core Logic Layer)
-  # =============================================================
-
+  # --- DIALOG SERVICE (Orchestrator) ---
   dialog-service:
     <<: *common-settings
-    image: ghcr.io/sentiric/sentiric-dialog-service:${TAG:-latest}
+    image: ghcr.io/sentiric/sentiric-dialog-service:latest
     build:
-      context: .
-      dockerfile: Dockerfile    
+      context: ../sentiric-dialog-service
+      dockerfile: Dockerfile
     volumes:
       - "${CERTIFICATES_REPO_PATH:-../sentiric-certificates}:/sentiric-certificates:ro"
     environment:
+      - ENV=development
+      - LOG_LEVEL=debug
       - DIALOG_SERVICE_HTTP_PORT=12060
       - DIALOG_SERVICE_GRPC_PORT=12061
-      - MOCK_LLM=false
-      - env=development
-      - LOG_LEVEL=debug
+      - REDIS_URL=redis:6379
+      
+      # [FIX] URL Hedefi ve mTLS
+      # Dialog service gateway'e bağlanır, gateway de mTLS ile korunur.
+      # Ancak Dialog'un kendi mTLS yapılandırması burada:
+      - LLM_GATEWAY_SERVICE_TARGET=llm-gateway-service:16021
+
+      # [SECURITY - mTLS Client/Server Config]
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - DIALOG_SERVICE_CERT_PATH=/sentiric-certificates/certs/dialog-service-chain.crt
       - DIALOG_SERVICE_KEY_PATH=/sentiric-certificates/certs/dialog-service.key
-      - REDIS_URL=redis:6379
-      - LLM_GATEWAY_SERVICE_TARGET=llm-gateway-service:16021
+
     ports:
       - "${DIALOG_SERVICE_HTTP_PORT:-12060}:${DIALOG_SERVICE_HTTP_PORT:-12060}"
       - "${DIALOG_SERVICE_GRPC_PORT:-12061}:${DIALOG_SERVICE_GRPC_PORT:-12061}"
+    
     networks:
       sentiric-net:
-        ipv4_address: ${DIALOG_SERVICE_IPV4_ADDRESS:-10.88.20.6}
+        ipv4_address: 10.88.20.6
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:12060/health" ]
+      interval: 10s
+      retries: 10
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+      llm-gateway-service:
+        condition: service_healthy
