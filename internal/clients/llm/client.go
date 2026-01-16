@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -29,23 +30,48 @@ type GatewayClient struct {
 	log    zerolog.Logger
 }
 
-func NewGatewayClient(target, certPath, keyPath, caPath string, log zerolog.Logger) (*GatewayClient, error) {
+func NewGatewayClient(targetURL string, certPath, keyPath, caPath string, log zerolog.Logger) (*GatewayClient, error) {
 	var opts []grpc.DialOption
+
+	// [FIX] URL Sanitization: "https://" veya "http://" ön eklerini kaldır.
+	// Go gRPC client sadece "host:port" formatını kabul eder.
+	cleanTarget := targetURL
+	if strings.HasPrefix(cleanTarget, "https://") {
+		cleanTarget = strings.TrimPrefix(cleanTarget, "https://")
+	} else if strings.HasPrefix(cleanTarget, "http://") {
+		cleanTarget = strings.TrimPrefix(cleanTarget, "http://")
+	}
+
+	// ServerName (SNI) için portu ayır (örn: "llm-gateway-service:16021" -> "llm-gateway-service")
+	serverName := strings.Split(cleanTarget, ":")[0]
+
+	log.Info().
+		Str("original_url", targetURL).
+		Str("clean_target", cleanTarget).
+		Str("sni", serverName).
+		Msg("LLM Gateway bağlantısı hazırlanıyor")
 
 	// mTLS Konfigürasyonu
 	if certPath != "" && keyPath != "" && caPath != "" {
-		tlsConfig, err := loadClientTLS(certPath, keyPath, caPath)
-		if err != nil {
-			return nil, fmt.Errorf("client TLS yüklenemedi: %w", err)
+		// Dosya varlık kontrolü
+		if _, err := os.Stat(certPath); os.IsNotExist(err) {
+			log.Warn().Str("path", certPath).Msg("Sertifika dosyası bulunamadı, INSECURE moda geçiliyor.")
+			opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		} else {
+			tlsConfig, err := loadClientTLS(certPath, keyPath, caPath, serverName)
+			if err != nil {
+				return nil, fmt.Errorf("client TLS yüklenemedi: %w", err)
+			}
+			opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+			log.Info().Str("target", cleanTarget).Msg("🔐 LLM Gateway bağlantısı için mTLS aktif")
 		}
-		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
-		log.Info().Str("target", target).Msg("🔐 LLM Gateway bağlantısı için mTLS aktif")
 	} else {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		log.Warn().Str("target", target).Msg("⚠️ LLM Gateway bağlantısı INSECURE (Şifresiz)")
+		log.Warn().Str("target", cleanTarget).Msg("⚠️ LLM Gateway bağlantısı INSECURE (Şifresiz)")
 	}
 
-	conn, err := grpc.NewClient(target, opts...)
+	// [FIX] Temizlenmiş hedefi kullan
+	conn, err := grpc.NewClient(cleanTarget, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +138,8 @@ func (c *GatewayClient) Close() {
 }
 
 // --- Helper: Load Client TLS ---
-func loadClientTLS(certPath, keyPath, caPath string) (*tls.Config, error) {
+// serverName parametresi eklendi
+func loadClientTLS(certPath, keyPath, caPath, serverName string) (*tls.Config, error) {
 	// 1. İstemci Sertifikası (Client Auth için)
 	certificate, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
@@ -132,7 +159,7 @@ func loadClientTLS(certPath, keyPath, caPath string) (*tls.Config, error) {
 	return &tls.Config{
 		Certificates: []tls.Certificate{certificate},
 		RootCAs:      caPool,
-		ServerName:   "sentiric.cloud", // Sertifikadaki SAN (Subject Alt Name) ile eşleşmeli
+		ServerName:   serverName, // DÜZELTME: Dinamik serverName (örn: llm-gateway-service)
 	}, nil
 }
 
