@@ -29,7 +29,6 @@ func NewDialogService(sm *state.Manager, lc llm.Client, log zerolog.Logger) *Dia
 }
 
 // StreamConversation: Bi-directional streaming RPC
-// Kullanıcıdan parça parça gelen metni birleştirir, sonlandığında LLM'e sorar ve cevabı parça parça döner.
 func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamConversationServer) error {
 	ctx := stream.Context()
 	
@@ -47,9 +46,6 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 	var currentSession *state.Session
 	var currentInputBuffer strings.Builder
 	
-	// LLM İstemcisi bağlantı kontrolü
-	// (Gerekirse burada yapılabilir ama client katmanı zaten lazy connection yönetiyor)
-
 	for {
 		// 1. İstemciden Mesaj Al
 		in, err := stream.Recv()
@@ -58,7 +54,6 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			return nil
 		}
 		if err != nil {
-			// gRPC "Canceled" hatası normal bir bağlantı kopması olabilir
 			if status.Code(err) == codes.Canceled {
 				l.Warn().Msg("Stream istemci tarafından iptal edildi")
 				return nil
@@ -75,7 +70,6 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			sessionID := payload.Config.SessionId
 			userID := payload.Config.UserId
 			
-			// Logger'ı session bilgisiyle zenginleştir
 			l = l.With().Str("session_id", sessionID).Str("user_id", userID).Logger()
 			
 			sess, err := s.stateManager.GetSession(ctx, sessionID)
@@ -86,6 +80,57 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			sess.UserID = userID
 			currentSession = sess
 			l.Info().Int("history_len", len(sess.History)).Msg("Oturum bağlamı yüklendi")
+
+			// --- YENİ EKLENEN KISIM: PROAKTİF KARŞILAMA ---
+			// Eğer konuşma geçmişi boşsa (yeni arama), AI ilk sözü söylemelidir.
+			if len(sess.History) == 0 {
+				l.Info().Msg("Yeni oturum: Asistan otomatik karşılama mesajı üretiyor...")
+				
+				// LLM'e özel bir "başlangıç" komutu gönderiyoruz.
+				// Bu metin kullanıcıdan gelmiş gibi görünmeyecek, sistem talimatı olarak işlenecek.
+				greetingPrompt := "Sen bir telefon asistanısın. Kullanıcıyı kibarca karşıla, ismini söyle ve nasıl yardımcı olabileceğini sor. Lütfen kısa ve net ol."
+				
+				// LLM Çağrısı (Geçmiş + Greeting Prompt)
+				tokensChan, err := s.llmClient.Generate(ctx, traceID, currentSession.History, greetingPrompt)
+				if err != nil {
+					l.Error().Err(err).Msg("LLM karşılama hatası")
+					// Hata olsa bile stream kopmasın, kullanıcı konuşabilir.
+					continue
+				}
+
+				var fullResponse strings.Builder
+				for token := range tokensChan {
+					fullResponse.WriteString(token)
+					err := stream.Send(&dialogv1.StreamConversationResponse{
+						Payload: &dialogv1.StreamConversationResponse_TextResponse{
+							TextResponse: token,
+						},
+					})
+					if err != nil {
+						l.Error().Err(err).Msg("Token gönderilemedi")
+						return err
+					}
+				}
+
+				// Final sinyali
+				stream.Send(&dialogv1.StreamConversationResponse{
+					Payload: &dialogv1.StreamConversationResponse_IsFinalResponse{
+						IsFinalResponse: true,
+					},
+				})
+
+				// Asistan cevabını geçmişe kaydet
+				aiResponse := fullResponse.String()
+				s.stateManager.AddTurn(currentSession, "assistant", aiResponse)
+				
+				// Durumu kaydet
+				if err := s.stateManager.SaveSession(ctx, currentSession); err != nil {
+					l.Error().Err(err).Msg("Oturum durumu kaydedilemedi")
+				}
+				
+				l.Info().Msg("Karşılama mesajı tamamlandı ve gönderildi.")
+			}
+			// --- YENİ KISIM SONU ---
 
 		// B. Metin Girdisi (STT'den parça parça gelir)
 		case *dialogv1.StreamConversationRequest_TextInput:
@@ -114,7 +159,6 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			currentInputBuffer.Reset()
 
 			// 2. LLM Çağrısı (Stream)
-			// TraceID'yi alt servise iletiyoruz
 			tokensChan, err := s.llmClient.Generate(ctx, traceID, currentSession.History, userText)
 			if err != nil {
 				l.Error().Err(err).Msg("LLM servisine erişim hatası")
