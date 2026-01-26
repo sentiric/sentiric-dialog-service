@@ -31,7 +31,7 @@ func NewDialogService(sm *state.Manager, lc llm.Client, log zerolog.Logger) *Dia
 // StreamConversation: Bi-directional streaming RPC
 func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamConversationServer) error {
 	ctx := stream.Context()
-	
+
 	// Trace ID Extraction
 	traceID := "unknown"
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
@@ -39,13 +39,13 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			traceID = ids[0]
 		}
 	}
-	
+
 	l := s.log.With().Str("trace_id", traceID).Logger()
 	l.Info().Msg("Yeni dialog stream başlatıldı")
 
 	var currentSession *state.Session
 	var currentInputBuffer strings.Builder
-	
+
 	for {
 		// 1. İstemciden Mesaj Al
 		in, err := stream.Recv()
@@ -64,14 +64,14 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 
 		// 2. Payload Tipine Göre İşle
 		switch payload := in.Payload.(type) {
-		
+
 		// A. Konfigürasyon (Oturum Başlatma)
 		case *dialogv1.StreamConversationRequest_Config:
 			sessionID := payload.Config.SessionId
 			userID := payload.Config.UserId
-			
+
 			l = l.With().Str("session_id", sessionID).Str("user_id", userID).Logger()
-			
+
 			sess, err := s.stateManager.GetSession(ctx, sessionID)
 			if err != nil {
 				l.Error().Err(err).Msg("Oturum yüklenirken Redis hatası")
@@ -85,15 +85,14 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			// Eğer konuşma geçmişi boşsa (yeni arama), AI ilk sözü söylemelidir.
 			if len(sess.History) == 0 {
 				l.Info().Msg("Yeni oturum: Asistan otomatik karşılama mesajı üretiyor...")
-				
+
 				// LLM'e özel bir "başlangıç" komutu gönderiyoruz.
-				// Bu metin kullanıcıdan gelmiş gibi görünmeyecek, sistem talimatı olarak işlenecek.
-				greetingPrompt := "Sen bir telefon asistanısın. Kullanıcıyı kibarca karşıla, ismini söyle ve nasıl yardımcı olabileceğini sor. Lütfen kısa ve net ol."
-				
+				greetingPrompt := "Sen bir telefon asistanısın. Kullanıcıyı kibarca karşıla ve nasıl yardımcı olabileceğini sor. Lütfen kısa ve net ol."
+
 				// LLM Çağrısı (Geçmiş + Greeting Prompt)
 				tokensChan, err := s.llmClient.Generate(ctx, traceID, currentSession.History, greetingPrompt)
 				if err != nil {
-					l.Error().Err(err).Msg("LLM karşılama hatası")
+					l.Error().Err(err).Msg("LLM karşılama çağrısı başarısız, kullanıcı girdisi bekleniyor.")
 					// Hata olsa bile stream kopmasın, kullanıcı konuşabilir.
 					continue
 				}
@@ -107,7 +106,7 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 						},
 					})
 					if err != nil {
-						l.Error().Err(err).Msg("Token gönderilemedi")
+						l.Error().Err(err).Msg("Token istemciye gönderilemedi")
 						return err
 					}
 				}
@@ -122,13 +121,13 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 				// Asistan cevabını geçmişe kaydet
 				aiResponse := fullResponse.String()
 				s.stateManager.AddTurn(currentSession, "assistant", aiResponse)
-				
+
 				// Durumu kaydet
 				if err := s.stateManager.SaveSession(ctx, currentSession); err != nil {
-					l.Error().Err(err).Msg("Oturum durumu kaydedilemedi")
+					l.Error().Err(err).Msg("Oturum durumu kaydedilemedi (Veri kaybı riski!)")
 				}
-				
-				l.Info().Msg("Karşılama mesajı tamamlandı ve gönderildi.")
+
+				l.Info().Str("response", aiResponse).Msg("Karşılama mesajı tamamlandı ve gönderildi.")
 			}
 			// --- YENİ KISIM SONU ---
 
@@ -145,13 +144,13 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			if !payload.IsFinalInput {
 				continue
 			}
-			
+
 			userText := strings.TrimSpace(currentInputBuffer.String())
 			if userText == "" {
 				l.Debug().Msg("Boş girdi alındı, işlem atlanıyor")
-				continue 
+				continue
 			}
-			
+
 			l.Info().Str("input", userText).Msg("Kullanıcı girdisi tamamlandı, LLM'e gönderiliyor")
 
 			// 1. Kullanıcı girdisini geçmişe ekle (Bellekte)
@@ -167,7 +166,7 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 
 			// 3. LLM Yanıtını İstemciye Aktar (Token Token)
 			var fullResponse strings.Builder
-			
+
 			for token := range tokensChan {
 				fullResponse.WriteString(token)
 				err := stream.Send(&dialogv1.StreamConversationResponse{
@@ -195,7 +194,7 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			// 5. Asistan cevabını geçmişe ekle ve Redis'e kaydet
 			aiResponse := fullResponse.String()
 			s.stateManager.AddTurn(currentSession, "assistant", aiResponse)
-			
+
 			if err := s.stateManager.SaveSession(ctx, currentSession); err != nil {
 				l.Error().Err(err).Msg("Oturum durumu kaydedilemedi (Veri kaybı riski!)")
 			} else {
