@@ -1,12 +1,14 @@
 package service
 
 import (
+	"context"
 	"io"
 	"strings"
 
 	"github.com/rs/zerolog"
 	dialogv1 "github.com/sentiric/sentiric-contracts/gen/go/sentiric/dialog/v1"
 	"github.com/sentiric/sentiric-dialog-service/internal/clients/llm"
+	"github.com/sentiric/sentiric-dialog-service/internal/retry"
 	"github.com/sentiric/sentiric-dialog-service/internal/state"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -90,7 +92,10 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 				greetingPrompt := "Sen bir telefon asistanısın. Kullanıcıyı kibarca karşıla ve nasıl yardımcı olabileceğini sor. Lütfen kısa ve net ol."
 
 				// LLM Çağrısı (Geçmiş + Greeting Prompt)
-				tokensChan, err := s.llmClient.Generate(ctx, traceID, currentSession.History, greetingPrompt)
+				// ✅ RETRY ENTEGRASYONU
+				tokensChan, err := retry.WithExponentialBackoff(ctx, func(ctx context.Context) (<-chan string, error) {
+					return s.llmClient.Generate(ctx, traceID, currentSession.History, greetingPrompt)
+				}, 3)
 				if err != nil {
 					l.Error().Err(err).Msg("LLM karşılama çağrısı başarısız, kullanıcı girdisi bekleniyor.")
 					// Hata olsa bile stream kopmasın, kullanıcı konuşabilir.
@@ -158,7 +163,10 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			currentInputBuffer.Reset()
 
 			// 2. LLM Çağrısı (Stream)
-			tokensChan, err := s.llmClient.Generate(ctx, traceID, currentSession.History, userText)
+			// ✅ RETRY ENTEGRASYONU
+			tokensChan, err := retry.WithExponentialBackoff(ctx, func(ctx context.Context) (<-chan string, error) {
+				return s.llmClient.Generate(ctx, traceID, currentSession.History, userText)
+			}, 3)
 			if err != nil {
 				l.Error().Err(err).Msg("LLM servisine erişim hatası")
 				return status.Errorf(codes.Unavailable, "Yapay zeka servisi şu an yanıt veremiyor")
