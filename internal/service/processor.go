@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// SentenceBuffer, LLM'den gelen token'ları biriktirir ve cümle bitişlerinde teslim eder.
+// SentenceBuffer, LLM'den gelen küçük token parçalarını anlamlı cümlelere birleştirir.
 type SentenceBuffer struct {
 	builder strings.Builder
 }
@@ -19,8 +19,8 @@ func (sb *SentenceBuffer) Push(token string) (string, bool) {
 	sb.builder.WriteString(token)
 	current := sb.builder.String()
 
-	// Cümle sonu işaretleri kontrolü (Türkçe ve İngilizce uyumlu)
 	if len(token) > 0 {
+		// Son karakteri kontrol et
 		lastChar := token[len(token)-1:]
 		if strings.ContainsAny(lastChar, ".?!:;\n") {
 			fullSentence := strings.TrimSpace(current)
@@ -31,8 +31,8 @@ func (sb *SentenceBuffer) Push(token string) (string, bool) {
 		}
 	}
 
-	// Çok uzun metinlerde (noktalama yoksa) 100 karakterde bir zorunlu flush
-	if sb.builder.Len() > 100 && strings.HasSuffix(token, " ") {
+	// Emniyet kilidi: Cümle 150 karakteri geçerse zorunlu flush (TTS gecikmesini önlemek için)
+	if sb.builder.Len() > 150 && strings.HasSuffix(token, " ") {
 		fullSentence := strings.TrimSpace(current)
 		sb.builder.Reset()
 		return fullSentence, true
@@ -41,7 +41,6 @@ func (sb *SentenceBuffer) Push(token string) (string, bool) {
 	return "", false
 }
 
-// Flush, buffer'da kalan son metni (noktalama olmasa bile) döndürür.
 func (sb *SentenceBuffer) Flush() (string, bool) {
 	final := strings.TrimSpace(sb.builder.String())
 	sb.builder.Reset()

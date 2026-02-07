@@ -13,13 +13,13 @@ import (
 )
 
 const SessionTTL = 1 * time.Hour
+const MaxHistoryTurns = 20 // Konu bütünlüğü ve performans dengesi
 
 type Session struct {
-	SessionID string `json:"sessionId"`
-	UserID    string `json:"userId"`
-	// KRİTİK: Kontrat tipiyle tam uyum
-	History  []*llmv1.ConversationTurn `json:"history"`
-	Metadata map[string]string         `json:"metadata,omitempty"`
+	SessionID string                    `json:"sessionId"`
+	UserID    string                    `json:"userId"`
+	History   []*llmv1.ConversationTurn `json:"history"`
+	Metadata  map[string]string         `json:"metadata,omitempty"`
 }
 
 type Manager struct {
@@ -55,9 +55,9 @@ func (m *Manager) GetSession(ctx context.Context, sessionID string) (*Session, e
 func (m *Manager) SaveSession(ctx context.Context, session *Session) error {
 	key := fmt.Sprintf("session:%s", session.SessionID)
 
-	// Geçmişi temiz tut (Son 20 mesaj kuralı - Context Window yönetimi)
-	if len(session.History) > 20 {
-		session.History = session.History[len(session.History)-20:]
+	// Bağlam Budama (Pruning): Son 20 mesajı tut
+	if len(session.History) > MaxHistoryTurns {
+		session.History = session.History[len(session.History)-MaxHistoryTurns:]
 	}
 
 	data, err := json.Marshal(session)

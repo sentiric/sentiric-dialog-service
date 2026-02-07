@@ -51,18 +51,19 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 
 		switch payload := in.Payload.(type) {
 		case *dialogv1.StreamConversationRequest_Config:
-			// 1. Oturum Kurulumu & Proactive Greeting
+			// 1. Oturum Yükleme
 			sess, err := s.stateManager.GetSession(ctx, payload.Config.SessionId)
 			if err != nil {
-				return status.Errorf(codes.Internal, "State error: %v", err)
+				return status.Errorf(codes.Internal, "Redis error: %v", err)
 			}
 			sess.UserID = payload.Config.UserId
 			currentSession = sess
 
+			// 2. Proaktif Karşılama (Eğer tarihçe boşsa)
 			if len(sess.History) == 0 {
-				l.Info().Msg("✨ Yeni çağrı: Karşılama mesajı üretiliyor...")
-				if err := s.generateAndSend(ctx, stream, currentSession, "PROMPT_GREETING", traceID, sentenceBuffer, l); err != nil {
-					l.Error().Err(err).Msg("Karşılama mesajı başarısız.")
+				l.Info().Msg("✨ New session detected. Generating proactive greeting.")
+				if err := s.generateAndStream(ctx, stream, currentSession, "PROMPT_GREETING", traceID, sentenceBuffer, l); err != nil {
+					l.Error().Err(err).Msg("Greeting failed.")
 				}
 			}
 
@@ -77,18 +78,17 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			userInput := strings.TrimSpace(inputBuffer.String())
 			inputBuffer.Reset()
 
-			l.Info().Str("input", userInput).Msg("🗣️ Kullanıcı girdisi işleniyor")
+			l.Info().Str("input", userInput).Msg("🗣️ User input finalized.")
 			s.stateManager.AddTurn(currentSession, "user", userInput)
 
-			if err := s.generateAndSend(ctx, stream, currentSession, userInput, traceID, sentenceBuffer, l); err != nil {
+			if err := s.generateAndStream(ctx, stream, currentSession, userInput, traceID, sentenceBuffer, l); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-// generateAndSend: LLM'den yanıt alır, cümlelere böler ve stream eder.
-func (s *DialogService) generateAndSend(
+func (s *DialogService) generateAndStream(
 	ctx context.Context,
 	stream dialogv1.DialogService_StreamConversationServer,
 	sess *state.Session,
@@ -97,6 +97,7 @@ func (s *DialogService) generateAndSend(
 	sb *SentenceBuffer,
 	l zerolog.Logger,
 ) error {
+	// LLM'e Git (Retry mekanizmasıyla)
 	tokensChan, err := retry.WithExponentialBackoff(ctx, func(ctx context.Context) (<-chan string, error) {
 		return s.llmClient.Generate(ctx, traceID, sess.History, prompt)
 	}, 3)
@@ -105,32 +106,33 @@ func (s *DialogService) generateAndSend(
 		return status.Errorf(codes.Unavailable, "LLM unreachable: %v", err)
 	}
 
-	var fullAIResponse strings.Builder
+	var fullResponse strings.Builder
 
 	for token := range tokensChan {
-		fullAIResponse.WriteString(token)
+		fullResponse.WriteString(token)
 
-		// Cümle bazlı bufferlama mantığı
+		// Cümle bazlı bufferlama
 		if sentence, ok := sb.Push(token); ok {
-			s.sendSentence(stream, sentence)
+			s.sendToClient(stream, sentence)
 		}
 	}
 
-	// Buffer'da kalan son parçayı gönder
+	// Buffer'daki son parçayı gönder
 	if finalPart, ok := sb.Flush(); ok {
-		s.sendSentence(stream, finalPart)
+		s.sendToClient(stream, finalPart)
 	}
 
-	// Final sinyali ve state kaydı
+	// Final Sinyali
 	stream.Send(&dialogv1.StreamConversationResponse{
 		Payload: &dialogv1.StreamConversationResponse_IsFinalResponse{IsFinalResponse: true},
 	})
 
-	s.stateManager.AddTurn(sess, "assistant", fullAIResponse.String())
+	// Tarihçeye ekle ve kaydet
+	s.stateManager.AddTurn(sess, "assistant", fullResponse.String())
 	return s.stateManager.SaveSession(ctx, sess)
 }
 
-func (s *DialogService) sendSentence(stream dialogv1.DialogService_StreamConversationServer, text string) {
+func (s *DialogService) sendToClient(stream dialogv1.DialogService_StreamConversationServer, text string) {
 	stream.Send(&dialogv1.StreamConversationResponse{
 		Payload: &dialogv1.StreamConversationResponse_TextResponse{TextResponse: text + " "},
 	})
@@ -147,9 +149,9 @@ func (s *DialogService) getTraceID(ctx context.Context) string {
 
 func (s *DialogService) handleStreamError(err error, l zerolog.Logger) error {
 	if status.Code(err) == codes.Canceled {
-		l.Warn().Msg("Stream iptal edildi.")
+		l.Warn().Msg("Client closed stream.")
 		return nil
 	}
-	l.Error().Err(err).Msg("Stream hatası.")
+	l.Error().Err(err).Msg("Stream read error.")
 	return err
 }
