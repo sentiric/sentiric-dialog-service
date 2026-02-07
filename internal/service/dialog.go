@@ -24,11 +24,7 @@ type DialogService struct {
 }
 
 func NewDialogService(sm *state.Manager, lc llm.Client, log zerolog.Logger) *DialogService {
-	return &DialogService{
-		stateManager: sm,
-		llmClient:    lc,
-		log:          log,
-	}
+	return &DialogService{stateManager: sm, llmClient: lc, log: log}
 }
 
 func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamConversationServer) error {
@@ -51,19 +47,20 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 
 		switch payload := in.Payload.(type) {
 		case *dialogv1.StreamConversationRequest_Config:
-			// 1. Oturum Yükleme
+			// 1. Session Retrieval
 			sess, err := s.stateManager.GetSession(ctx, payload.Config.SessionId)
 			if err != nil {
-				return status.Errorf(codes.Internal, "Redis error: %v", err)
+				l.Error().Err(err).Msg("Redis session lookup failed.")
+				return status.Errorf(codes.Internal, "Redis lookup fail")
 			}
 			sess.UserID = payload.Config.UserId
 			currentSession = sess
 
-			// 2. Proaktif Karşılama (Eğer tarihçe boşsa)
+			// 2. Proactive Engagement
 			if len(sess.History) == 0 {
-				l.Info().Msg("✨ New session detected. Generating proactive greeting.")
+				l.Info().Msg("✨ Initializing context for new session.")
 				if err := s.generateAndStream(ctx, stream, currentSession, "PROMPT_GREETING", traceID, sentenceBuffer, l); err != nil {
-					l.Error().Err(err).Msg("Greeting failed.")
+					l.Error().Err(err).Msg("Greeting sequence failed.")
 				}
 			}
 
@@ -78,7 +75,7 @@ func (s *DialogService) StreamConversation(stream dialogv1.DialogService_StreamC
 			userInput := strings.TrimSpace(inputBuffer.String())
 			inputBuffer.Reset()
 
-			l.Info().Str("input", userInput).Msg("🗣️ User input finalized.")
+			l.Info().Str("input", userInput).Msg("🗣️ Processing user utterance.")
 			s.stateManager.AddTurn(currentSession, "user", userInput)
 
 			if err := s.generateAndStream(ctx, stream, currentSession, userInput, traceID, sentenceBuffer, l); err != nil {
@@ -97,43 +94,55 @@ func (s *DialogService) generateAndStream(
 	sb *SentenceBuffer,
 	l zerolog.Logger,
 ) error {
-	// LLM'e Git (Retry mekanizmasıyla)
+	l.Debug().Str("prompt", prompt).Msg("🚀 Initiating LLM token stream.")
+
+	// [RETRY MANTIGI]: LLM ulasilamazsa 3 kez dene
 	tokensChan, err := retry.WithExponentialBackoff(ctx, func(ctx context.Context) (<-chan string, error) {
 		return s.llmClient.Generate(ctx, traceID, sess.History, prompt)
 	}, 3)
 
 	if err != nil {
-		return status.Errorf(codes.Unavailable, "LLM unreachable: %v", err)
+		l.Error().Err(err).Msg("❌ LLM backend reached maximum retry limit.")
+		return status.Errorf(codes.Unavailable, "LLM backend unreachable")
 	}
 
 	var fullResponse strings.Builder
+	tokenCount := 0
 
 	for token := range tokensChan {
+		tokenCount++
 		fullResponse.WriteString(token)
 
-		// Cümle bazlı bufferlama
+		// Kelime kelime değil, cümle cümle gönder (TTS kalitesi için)
 		if sentence, ok := sb.Push(token); ok {
+			l.Trace().Str("sentence", sentence).Msg("📤 Streaming sentence to client.")
 			s.sendToClient(stream, sentence)
 		}
 	}
 
-	// Buffer'daki son parçayı gönder
+	// Kalan parçaları süpür
 	if finalPart, ok := sb.Flush(); ok {
+		l.Trace().Str("final_part", finalPart).Msg("📤 Streaming final sentence part.")
 		s.sendToClient(stream, finalPart)
 	}
 
-	// Final Sinyali
+	// İşlem bitti sinyali (EOS)
+	l.Info().
+		Int("tokens_received", tokenCount).
+		Int("history_depth", len(sess.History)).
+		Msg("🏁 LLM stream completed successfully.")
+
 	stream.Send(&dialogv1.StreamConversationResponse{
 		Payload: &dialogv1.StreamConversationResponse_IsFinalResponse{IsFinalResponse: true},
 	})
 
-	// Tarihçeye ekle ve kaydet
+	// Kaydet
 	s.stateManager.AddTurn(sess, "assistant", fullResponse.String())
 	return s.stateManager.SaveSession(ctx, sess)
 }
 
 func (s *DialogService) sendToClient(stream dialogv1.DialogService_StreamConversationServer, text string) {
-	stream.Send(&dialogv1.StreamConversationResponse{
+	_ = stream.Send(&dialogv1.StreamConversationResponse{
 		Payload: &dialogv1.StreamConversationResponse_TextResponse{TextResponse: text + " "},
 	})
 }
@@ -149,9 +158,9 @@ func (s *DialogService) getTraceID(ctx context.Context) string {
 
 func (s *DialogService) handleStreamError(err error, l zerolog.Logger) error {
 	if status.Code(err) == codes.Canceled {
-		l.Warn().Msg("Client closed stream.")
+		l.Warn().Msg("Client closed dialog stream.")
 		return nil
 	}
-	l.Error().Err(err).Msg("Stream read error.")
+	l.Error().Err(err).Msg("Dialog stream recv error.")
 	return err
 }

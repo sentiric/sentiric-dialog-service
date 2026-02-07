@@ -6,8 +6,8 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.5.1
 	github.com/rs/zerolog v1.34.0
-	// GÜNCELLEME: Platform geneli tutarlılık için v1.13.5 sürümüne yükseltildi.
-	github.com/sentiric/sentiric-contracts v1.13.7
+	// GÜNCELLEME: v1.15.0
+	github.com/sentiric/sentiric-contracts v1.15.0
 	google.golang.org/grpc v1.75.1
 )
 
