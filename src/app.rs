@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::signal;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
-use tracing::{error, info}; // unused import "error" uyarısı için kullanıldı
+use tracing::{error, info}; // Artık her ikisi de koda dahil
 
 pub struct App;
 

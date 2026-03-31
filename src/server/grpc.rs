@@ -193,7 +193,7 @@ impl DialogService for DialogServerImpl {
                                 });
                                 state_mgr.save_history(&session_id, history).await;
 
-                                // DÜZELTME: .await eklendi (Future asenkron olarak tamamlanmalı)
+                                // DÜZELTME: .await eklendi
                                 let _ = tx
                                     .send(Ok(StreamConversationResponse {
                                         payload: Some(RespPayload::IsFinalResponse(true)),

@@ -62,7 +62,7 @@ where
             "attributes": attributes
         });
 
-        // DÜZELTME: to_string() kaldırıldı, writeln! doğrudan JSON değerini işler
+        // DÜZELTME: to_string() kaldırıldı, writeln! doğrudan JSON'u işler
         writeln!(writer, "{log_obj}")
     }
 }

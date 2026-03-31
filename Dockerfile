@@ -1,11 +1,9 @@
 # --- STAGE 1: Chef (Planlama) ---
-FROM lukemathwalker/cargo-chef:latest-rust-1.84-bookworm AS chef
+# DÜZELTME: rand_core v0.10+ ve Edition 2024 desteği için Rust 1.85+ zorunludur.
+FROM lukemathwalker/cargo-chef:latest-rust-1.85-bookworm AS chef
 WORKDIR /app
 
 # --- STAGE 2: Planner ---
-# cargo-chef, projedeki kütüphanelerin (dependencies) listesini (recipe.json) çıkarır.
-# Amacı: Kod değişse bile kütüphaneler değişmediği sürece Docker cache'ini kullanarak 
-# derleme süresini dakikalardan saniyelere indirmektir.
 FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
@@ -17,10 +15,10 @@ COPY --from=planner /app/recipe.json recipe.json
 # Protobuf derleyicisini kur
 RUN apt-get update && apt-get install -y protobuf-compiler cmake && rm -rf /var/lib/apt/lists/*
 
-# Önce SAEDECE kütüphaneleri derle (Cache layer)
+# Önce kütüphaneleri derle (Layer Caching)
 RUN cargo chef cook --release --recipe-path recipe.json
 
-# Kendi kaynak kodlarımızı kopyala ve derle
+# Kaynak kodları kopyala ve derle
 COPY . .
 RUN cargo build --release --bin sentiric-dialog-service
 
@@ -40,7 +38,6 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/sentiric-dialog-service /app/
 
-# Environment Variables
 ENV DIALOG_SERVICE_LISTEN_ADDRESS=0.0.0.0
 ENV DIALOG_SERVICE_GRPC_PORT=12061
 ENV DIALOG_SERVICE_HTTP_PORT=12060
