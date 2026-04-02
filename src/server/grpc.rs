@@ -219,3 +219,9 @@ impl DialogService for DialogServerImpl {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
+
+// ... [İlgili Kısımda GhostPublisher Tetiklemesi]
+// Dialog turn bittiğinde (Final Response aşaması), RMQ'ya duygu verilerini bas.
+// Bu örnek olarak grpc.rs içinde `state_manager`'ın altına enjekte edilecek bir pub mekanizmasıdır.
+
+// (Not: dialog-service tam olarak RabbitMQ'ya bağlanmadığı için bu dosyanın app.rs içinde başlatılması ve ARC üzerinden gRPC implementasyonuna verilmesi gerekir. Crystalline hazır olduğunda bunu tam bağlayacağız.)
