@@ -12,14 +12,17 @@ use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct KnowledgeClient {
-    client: Option<KnowledgeQueryServiceClient<Channel>>, // [CRITICAL FIX]: Option yapıldı
+    client: Option<KnowledgeQueryServiceClient<Channel>>,
 }
 
 impl KnowledgeClient {
     pub async fn new(config: &AppConfig) -> anyhow::Result<Self> {
-        let url = config.knowledge_query_service_target.clone();
+        // [CRITICAL FIX]: Trim kullanarak tırnak veya boşluklardan kaynaklı gizli URL doluluklarını temizle
+        let url = config
+            .knowledge_query_service_target
+            .trim()
+            .replace("\"", "");
 
-        // [CRITICAL FIX]: Eğer Nano moddaysak ve URL boşsa güvenli bypass (Ghost Mode)
         if url.is_empty() {
             info!(
                 event = "RAG_DISABLED",
@@ -61,7 +64,7 @@ impl KnowledgeClient {
     ) -> Option<QueryResponse> {
         let mut client = match &self.client {
             Some(c) => c.clone(),
-            None => return None, // RAG kapalıysa boş dön (Crash yeme)
+            None => return None,
         };
 
         let request_payload = QueryRequest {
