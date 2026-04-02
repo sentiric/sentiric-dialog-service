@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-dialog-service"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 
 [dependencies]
@@ -39,7 +39,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 
 # Contracts
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.20.1" }
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.20.2" }
 
 [build-dependencies]
 tonic-build = "0.11"

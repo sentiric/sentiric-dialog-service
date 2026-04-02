@@ -1,4 +1,4 @@
-// Hata E0046 (Unused Import) Düzeltmesi: 'error' artık kullanılmıyor, warn ve info bırakıldı.
+// File: sentiric-dialog-service/src/clients/knowledge_client.rs
 use crate::clients::load_client_tls_config;
 use crate::config::AppConfig;
 use sentiric_contracts::sentiric::knowledge::v1::knowledge_query_service_client::KnowledgeQueryServiceClient;
@@ -12,12 +12,22 @@ use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct KnowledgeClient {
-    client: KnowledgeQueryServiceClient<Channel>,
+    client: Option<KnowledgeQueryServiceClient<Channel>>, // [CRITICAL FIX]: Option yapıldı
 }
 
 impl KnowledgeClient {
     pub async fn new(config: &AppConfig) -> anyhow::Result<Self> {
         let url = config.knowledge_query_service_target.clone();
+
+        // [CRITICAL FIX]: Eğer Nano moddaysak ve URL boşsa güvenli bypass (Ghost Mode)
+        if url.is_empty() {
+            info!(
+                event = "RAG_DISABLED",
+                "Knowledge Query URL is empty. Operating in RAG-less Nano-Edge mode."
+            );
+            return Ok(Self { client: None });
+        }
+
         if url.starts_with("http://") {
             panic!("⚠️ [ARCH-COMPLIANCE] Insecure connection to Knowledge Query is FORBIDDEN.");
         }
@@ -38,7 +48,7 @@ impl KnowledgeClient {
             .await?;
 
         Ok(Self {
-            client: KnowledgeQueryServiceClient::new(channel),
+            client: Some(KnowledgeQueryServiceClient::new(channel)),
         })
     }
 
@@ -49,7 +59,10 @@ impl KnowledgeClient {
         trace_id: &str,
         span_id: &str,
     ) -> Option<QueryResponse> {
-        let mut client = self.client.clone();
+        let mut client = match &self.client {
+            Some(c) => c.clone(),
+            None => return None, // RAG kapalıysa boş dön (Crash yeme)
+        };
 
         let request_payload = QueryRequest {
             tenant_id: tenant_id.to_string(),
@@ -58,8 +71,6 @@ impl KnowledgeClient {
         };
 
         let mut req = Request::new(request_payload);
-
-        // [ARCH-COMPLIANCE] Mandatory 3 Second Timeout Absolute Boundary
         req.set_timeout(Duration::from_secs(3));
 
         if let Ok(meta_val) = MetadataValue::from_str(trace_id) {
