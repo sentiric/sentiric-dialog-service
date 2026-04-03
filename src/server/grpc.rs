@@ -1,8 +1,9 @@
-// Hata E0046 Düzeltmesi: Eski (Legacy) StartDialog ve ProcessUserInput metotları
-// Unimplemented olarak implemente edildi.
 use crate::clients::knowledge_client::KnowledgeClient;
 use crate::clients::llm_client::LlmClient;
 use crate::state::manager::StateManager;
+// [EKLENDİ]
+use crate::state::publisher::GhostPublisher;
+use serde_json::json;
 
 use sentiric_contracts::sentiric::dialog::v1::dialog_service_server::DialogService;
 use sentiric_contracts::sentiric::dialog::v1::stream_conversation_request::Payload as ReqPayload;
@@ -27,6 +28,7 @@ pub struct DialogServerImpl {
     state_manager: Arc<StateManager>,
     llm_client: Arc<LlmClient>,
     knowledge_client: Arc<KnowledgeClient>,
+    publisher: Arc<GhostPublisher>, // [EKLENDİ]
 }
 
 impl DialogServerImpl {
@@ -34,11 +36,13 @@ impl DialogServerImpl {
         state_manager: Arc<StateManager>,
         llm_client: Arc<LlmClient>,
         knowledge_client: Arc<KnowledgeClient>,
+        publisher: Arc<GhostPublisher>, // [EKLENDİ]
     ) -> Self {
         Self {
             state_manager,
             llm_client,
             knowledge_client,
+            publisher,
         }
     }
 }
@@ -47,7 +51,6 @@ impl DialogServerImpl {
 impl DialogService for DialogServerImpl {
     type StreamConversationStream = ReceiverStream<Result<StreamConversationResponse, Status>>;
 
-    // [E0046 FIX] Legacy RPC'ler: Desteklenmediği belirtilerek kapatıldı
     async fn start_dialog(
         &self,
         _request: Request<StartDialogRequest>,
@@ -62,7 +65,6 @@ impl DialogService for DialogServerImpl {
         Err(Status::unimplemented("Legacy process_user_input is deprecated. Use stream_conversation for Nano-Edge Architecture."))
     }
 
-    // Modern Full-Duplex Streaming RPC
     async fn stream_conversation(
         &self,
         request: Request<Streaming<StreamConversationRequest>>,
@@ -88,6 +90,7 @@ impl DialogService for DialogServerImpl {
         let state_mgr = self.state_manager.clone();
         let llm_cli = self.llm_client.clone();
         let rag_cli = self.knowledge_client.clone();
+        let publisher = self.publisher.clone(); // [EKLENDİ]
 
         tokio::spawn(async move {
             let mut session_id = String::new();
@@ -185,26 +188,35 @@ impl DialogService for DialogServerImpl {
                                 // 5. Save History
                                 history.push(ConversationTurn {
                                     role: "user".to_string(),
-                                    content: user_input,
+                                    content: user_input.clone(),
                                 });
                                 history.push(ConversationTurn {
                                     role: "assistant".to_string(),
-                                    content: assistant_response,
+                                    content: assistant_response.clone(),
                                 });
                                 state_mgr.save_history(&session_id, history).await;
 
-                                // DÜZELTME: .await eklendi
+                                // [EKLENDİ] Crystalline Service için 'dialog.turn.completed' olayını fırlat
+                                let event_payload = json!({
+                                    "session_id": session_id,
+                                    "trace_id": trace_id,
+                                    "user_input": user_input,
+                                    "assistant_response": assistant_response
+                                });
+                                publisher
+                                    .publish("dialog.turn.completed", event_payload)
+                                    .await;
+
                                 let _ = tx
                                     .send(Ok(StreamConversationResponse {
                                         payload: Some(RespPayload::IsFinalResponse(true)),
                                     }))
                                     .await;
 
-                                info!(event = "DIALOG_TURN_COMPLETED", trace_id = %trace_id, span_id = %span_id, "Dialog turn finished successfully.");
+                                info!(event = "DIALOG_TURN_COMPLETED", trace_id = %trace_id, span_id = %span_id, "Dialog turn finished and sent to MQ.");
                             }
                             Err(e) => {
                                 error!(event = "LLM_REQUEST_FAILED", trace_id = %trace_id, span_id = %span_id, error = %e, "Failed to call LLM Gateway.");
-                                // DÜZELTME: .await eklendi
                                 let _ = tx.send(Err(Status::internal("LLM Engine failed"))).await;
                             }
                         }
@@ -219,9 +231,3 @@ impl DialogService for DialogServerImpl {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
-
-// ... [İlgili Kısımda GhostPublisher Tetiklemesi]
-// Dialog turn bittiğinde (Final Response aşaması), RMQ'ya duygu verilerini bas.
-// Bu örnek olarak grpc.rs içinde `state_manager`'ın altına enjekte edilecek bir pub mekanizmasıdır.
-
-// (Not: dialog-service tam olarak RabbitMQ'ya bağlanmadığı için bu dosyanın app.rs içinde başlatılması ve ARC üzerinden gRPC implementasyonuna verilmesi gerekir. Crystalline hazır olduğunda bunu tam bağlayacağız.)

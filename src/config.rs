@@ -8,7 +8,6 @@ pub struct AppConfig {
     pub env: String,
     pub rust_log: String,
     pub service_version: String,
-    #[allow(dead_code)]
     pub tenant_id: String,
 
     pub host: String,
@@ -16,6 +15,7 @@ pub struct AppConfig {
     pub http_port: u16,
 
     pub redis_url: String,
+    pub rabbitmq_url: String, // [CRITICAL FIX]: Eksik konfigürasyon eklendi
     pub llm_gateway_service_target: String,
     pub knowledge_query_service_target: String,
 
@@ -33,6 +33,7 @@ impl AppConfig {
             .set_override_option("grpc_port", env::var("DIALOG_SERVICE_GRPC_PORT").ok())?
             .set_override_option("http_port", env::var("DIALOG_SERVICE_HTTP_PORT").ok())?
             .set_override_option("redis_url", env::var("REDIS_URL").ok())?
+            .set_override_option("rabbitmq_url", env::var("RABBITMQ_URL").ok())?
             .set_override_option(
                 "llm_gateway_service_target",
                 env::var("LLM_GATEWAY_SERVICE_TARGET").ok(),
@@ -49,6 +50,7 @@ impl AppConfig {
             .set_default("grpc_port", 12061)?
             .set_default("http_port", 12060)?
             .set_default("redis_url", "")?
+            .set_default("rabbitmq_url", "amqp://guest:guest@localhost:5672/%2f")?
             .set_default(
                 "llm_gateway_service_target",
                 "https://llm-gateway-service:16021",

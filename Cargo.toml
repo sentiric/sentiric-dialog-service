@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-dialog-service"
-version = "1.1.1"
+version = "1.1.4"
 edition = "2021"
 
 [dependencies]
@@ -28,10 +28,12 @@ tracing = "0.1"
 tracing-core = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
+hostname = "0.3" # SUTS v4.0 host name çözümü için
 
-# State Management (Nano-Edge Hybrid L1/L2)
+# State Management & Messaging (Nano-Edge Hybrid L1/L2)
 redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
 dashmap = "5.5"
+lapin = "2.3" # [CRITICAL FIX]: RabbitMQ Ghost Publisher için eklendi
 
 # Utils
 uuid = { version = "1.7", features = ["v4", "fast-rng"] }
@@ -39,7 +41,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 
 # Contracts
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.20.2" }
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.20.3" }
 
 [build-dependencies]
 tonic-build = "0.11"

@@ -5,6 +5,7 @@ use crate::logger::SutsV4Formatter;
 use crate::server::grpc::DialogServerImpl;
 use crate::server::http::start_health_server;
 use crate::state::manager::StateManager;
+use crate::state::publisher::GhostPublisher;
 use sentiric_contracts::sentiric::dialog::v1::dialog_service_server::DialogServiceServer;
 
 use anyhow::{Context, Result};
@@ -12,7 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::signal;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
-use tracing::{error, info}; // Artık her ikisi de koda dahil
+use tracing::{error, info};
 
 pub struct App;
 
@@ -40,13 +41,20 @@ impl App {
         let llm_client = Arc::new(LlmClient::new(&config).await?);
         let knowledge_client = Arc::new(KnowledgeClient::new(&config).await?);
 
+        // [CRITICAL FIX]: 'config.rabbitmq_url' okundu. (Clippy 'dead_code' hatası giderildi)
+        let publisher = Arc::new(
+            GhostPublisher::new(config.rabbitmq_url.clone(), config.tenant_id.clone()).await,
+        );
+
         let http_addr: SocketAddr = format!("{}:{}", config.host, config.http_port).parse()?;
         tokio::spawn(async move {
             start_health_server(http_addr).await;
         });
 
         let grpc_addr: SocketAddr = format!("{}:{}", config.host, config.grpc_port).parse()?;
-        let dialog_impl = DialogServerImpl::new(state_manager, llm_client, knowledge_client);
+
+        let dialog_impl =
+            DialogServerImpl::new(state_manager, llm_client, knowledge_client, publisher);
 
         let cert = tokio::fs::read(&config.dialog_service_cert_path)
             .await
