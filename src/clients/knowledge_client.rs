@@ -1,4 +1,4 @@
-// File: sentiric-dialog-service/src/clients/knowledge_client.rs
+// File: src/clients/knowledge_client.rs
 use crate::clients::load_client_tls_config;
 use crate::config::AppConfig;
 use sentiric_contracts::sentiric::knowledge::v1::knowledge_query_service_client::KnowledgeQueryServiceClient;
@@ -17,7 +17,6 @@ pub struct KnowledgeClient {
 
 impl KnowledgeClient {
     pub async fn new(config: &AppConfig) -> anyhow::Result<Self> {
-        // [CRITICAL FIX]: Trim kullanarak tırnak veya boşluklardan kaynaklı gizli URL doluluklarını temizle
         let url = config
             .knowledge_query_service_target
             .trim()
@@ -35,7 +34,7 @@ impl KnowledgeClient {
             panic!("⚠️ [ARCH-COMPLIANCE] Insecure connection to Knowledge Query is FORBIDDEN.");
         }
 
-        info!(event = "UPSTREAM_CONNECTING", target = %url, "🔐 Connecting to Knowledge Query (mTLS)");
+        info!(event = "UPSTREAM_CONNECTING", target = %url, "🔐 Connecting to Knowledge Query (mTLS - Lazy)");
 
         let domain = url
             .replace("https://", "")
@@ -45,10 +44,11 @@ impl KnowledgeClient {
             .to_string();
         let tls_config = load_client_tls_config(config, &domain).await?;
 
+        // [ARCH-COMPLIANCE FIX] .connect().await? yerine .connect_lazy() kullanılarak
+        // DNS yarış durumları (Consul) ve başlangıç çökmesi engellendi.
         let channel = Endpoint::from_shared(url)?
             .tls_config(tls_config)?
-            .connect()
-            .await?;
+            .connect_lazy();
 
         Ok(Self {
             client: Some(KnowledgeQueryServiceClient::new(channel)),
