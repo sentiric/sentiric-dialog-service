@@ -1,3 +1,4 @@
+// File: src/clients/llm_client.rs
 use crate::clients::load_client_tls_config;
 use crate::config::AppConfig;
 use sentiric_contracts::sentiric::llm::v1::llm_gateway_service_client::LlmGatewayServiceClient;
@@ -22,7 +23,7 @@ impl LlmClient {
             panic!("⚠️ [ARCH-COMPLIANCE] Insecure connection to LLM Gateway is FORBIDDEN.");
         }
 
-        info!(event = "UPSTREAM_CONNECTING", target = %url, "🔐 Connecting to LLM Gateway (mTLS)");
+        info!(event = "UPSTREAM_CONNECTING", target = %url, "🔐 Connecting to LLM Gateway (mTLS - Lazy)");
 
         let domain = url
             .replace("https://", "")
@@ -32,10 +33,11 @@ impl LlmClient {
             .to_string();
         let tls_config = load_client_tls_config(config, &domain).await?;
 
+        // [ARCH-COMPLIANCE FIX] .connect().await? yerine .connect_lazy() kullanılarak
+        // DNS yarış durumları (Consul) ve başlangıç çökmesi engellendi.
         let channel = Endpoint::from_shared(url)?
             .tls_config(tls_config)?
-            .connect()
-            .await?;
+            .connect_lazy();
 
         Ok(Self {
             client: LlmGatewayServiceClient::new(channel),

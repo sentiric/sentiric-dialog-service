@@ -175,7 +175,15 @@ impl DialogService for DialogServerImpl {
                                                     .await
                                                     .is_err()
                                                 {
-                                                    error!(event = "DIALOG_STREAM_CANCELLED", trace_id = %trace_id, span_id = %span_id, "Client disconnected. Aborting LLM stream.");
+                                                    // [ARCH-COMPLIANCE FIX]: Bu doğal bir "Barge-in" (Söz kesme)
+                                                    // olayıdır. Sistemin çökmesi (Error) değil,
+                                                    // kullanıcı kaynaklı bir iptal (Warn) sürecidir.
+                                                    tracing::warn!(
+                                                        event = "DIALOG_STREAM_CANCELLED",
+                                                        trace_id = %trace_id,
+                                                        span_id = %span_id,
+                                                        "Client disconnected (Barge-in). Aborting LLM stream gracefully."
+                                                    );
                                                     return;
                                                 }
                                             }
