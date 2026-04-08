@@ -14,7 +14,6 @@ impl ReflexConsumer {
                 match Connection::connect(&rmq_url, ConnectionProperties::default()).await {
                     Ok(conn) => {
                         if let Ok(channel) = conn.create_channel().await {
-                            // [ARCH-COMPLIANCE FIX]: Task-03 Cognitive Reflex RMQ Consumer
                             let queue = channel
                                 .queue_declare(
                                     "sentiric_dialog_reflex_queue",
@@ -59,6 +58,9 @@ impl ReflexConsumer {
                                         serde_json::from_slice::<Value>(&delivery.data)
                                     {
                                         let trace_id = payload["trace_id"].as_str().unwrap_or("");
+                                        // [ARCH-COMPLIANCE FIX]: Dialog'un doğru session'ı bulması için eklendi
+                                        let session_id =
+                                            payload["session_id"].as_str().unwrap_or(trace_id);
                                         let payload_json_str =
                                             payload["payload_json"].as_str().unwrap_or("{}");
 
@@ -67,12 +69,11 @@ impl ReflexConsumer {
                                         {
                                             let instruction =
                                                 insight["instruction"].as_str().unwrap_or("");
-                                            if !instruction.is_empty() && !trace_id.is_empty() {
-                                                info!(event = "INJECTING_REFLEX", trace_id = %trace_id, "Applying cognitive modifier to session");
-                                                // Task-04: SessionID = TraceID eşleşmesiyle hafızaya refleks enjekte et
+                                            if !instruction.is_empty() && !session_id.is_empty() {
+                                                info!(event = "INJECTING_REFLEX", session_id = %session_id, trace_id = %trace_id, "Applying cognitive modifier to session");
                                                 state_mgr
                                                     .inject_reflex(
-                                                        trace_id,
+                                                        session_id,
                                                         instruction.to_string(),
                                                     )
                                                     .await;

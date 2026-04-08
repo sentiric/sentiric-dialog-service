@@ -1,7 +1,6 @@
 use crate::clients::knowledge_client::KnowledgeClient;
 use crate::clients::llm_client::LlmClient;
 use crate::state::manager::StateManager;
-// [EKLENDİ]
 use crate::state::publisher::GhostPublisher;
 use serde_json::json;
 
@@ -28,7 +27,7 @@ pub struct DialogServerImpl {
     state_manager: Arc<StateManager>,
     llm_client: Arc<LlmClient>,
     knowledge_client: Arc<KnowledgeClient>,
-    publisher: Arc<GhostPublisher>, // [EKLENDİ]
+    publisher: Arc<GhostPublisher>,
 }
 
 impl DialogServerImpl {
@@ -36,7 +35,7 @@ impl DialogServerImpl {
         state_manager: Arc<StateManager>,
         llm_client: Arc<LlmClient>,
         knowledge_client: Arc<KnowledgeClient>,
-        publisher: Arc<GhostPublisher>, // [EKLENDİ]
+        publisher: Arc<GhostPublisher>,
     ) -> Self {
         Self {
             state_manager,
@@ -55,14 +54,18 @@ impl DialogService for DialogServerImpl {
         &self,
         _request: Request<StartDialogRequest>,
     ) -> Result<Response<StartDialogResponse>, Status> {
-        Err(Status::unimplemented("Legacy start_dialog is deprecated. Use stream_conversation for Nano-Edge Architecture."))
+        Err(Status::unimplemented(
+            "Legacy start_dialog is deprecated. Use stream_conversation.",
+        ))
     }
 
     async fn process_user_input(
         &self,
         _request: Request<ProcessUserInputRequest>,
     ) -> Result<Response<ProcessUserInputResponse>, Status> {
-        Err(Status::unimplemented("Legacy process_user_input is deprecated. Use stream_conversation for Nano-Edge Architecture."))
+        Err(Status::unimplemented(
+            "Legacy process_user_input is deprecated. Use stream_conversation.",
+        ))
     }
 
     async fn stream_conversation(
@@ -90,7 +93,7 @@ impl DialogService for DialogServerImpl {
         let state_mgr = self.state_manager.clone();
         let llm_cli = self.llm_client.clone();
         let rag_cli = self.knowledge_client.clone();
-        let publisher = self.publisher.clone(); // [EKLENDİ]
+        let publisher = self.publisher.clone();
 
         tokio::spawn(async move {
             let mut session_id = String::new();
@@ -111,9 +114,8 @@ impl DialogService for DialogServerImpl {
                         let span_id = uuid::Uuid::new_v4().to_string();
                         let user_input = accumulated_text.trim().to_string();
 
-                        let mut history = state_mgr.get_history(&session_id).await;
+                        let history = state_mgr.get_history(&session_id).await;
 
-                        // [ARCH-COMPLIANCE FIX]: Task-05 - RAG Noise/Hallucination Filter
                         let is_filler = user_input.eq_ignore_ascii_case("evet")
                             || user_input.eq_ignore_ascii_case("hayır")
                             || user_input.eq_ignore_ascii_case("tamam")
@@ -139,7 +141,7 @@ impl DialogService for DialogServerImpl {
                                 None
                             }
                         } else {
-                            None // Filler word ise RAG sorgusu atılmaz (Sıfır Gecikme)
+                            None
                         };
 
                         let llama_req = GenerateStreamRequest {
@@ -181,15 +183,7 @@ impl DialogService for DialogServerImpl {
                                                     .await
                                                     .is_err()
                                                 {
-                                                    // [ARCH-COMPLIANCE FIX]: Bu doğal bir "Barge-in" (Söz kesme)
-                                                    // olayıdır. Sistemin çökmesi (Error) değil,
-                                                    // kullanıcı kaynaklı bir iptal (Warn) sürecidir.
-                                                    tracing::warn!(
-                                                        event = "DIALOG_STREAM_CANCELLED",
-                                                        trace_id = %trace_id,
-                                                        span_id = %span_id,
-                                                        "Client disconnected (Barge-in). Aborting LLM stream gracefully."
-                                                    );
+                                                    tracing::warn!(event = "DIALOG_STREAM_CANCELLED", trace_id = %trace_id, "Client disconnected (Barge-in).");
                                                     return;
                                                 }
                                             }
@@ -199,18 +193,23 @@ impl DialogService for DialogServerImpl {
                                     }
                                 }
 
-                                // 5. Save History
-                                history.push(ConversationTurn {
-                                    role: "user".to_string(),
-                                    content: user_input.clone(),
-                                });
-                                history.push(ConversationTurn {
-                                    role: "assistant".to_string(),
-                                    content: assistant_response.clone(),
-                                });
-                                state_mgr.save_history(&session_id, history).await;
+                                // [ARCH-COMPLIANCE FIX]: Race condition olmaması için append_turns kullanıldı
+                                state_mgr
+                                    .append_turns(
+                                        &session_id,
+                                        vec![
+                                            ConversationTurn {
+                                                role: "user".to_string(),
+                                                content: user_input.clone(),
+                                            },
+                                            ConversationTurn {
+                                                role: "assistant".to_string(),
+                                                content: assistant_response.clone(),
+                                            },
+                                        ],
+                                    )
+                                    .await;
 
-                                // [EKLENDİ] Crystalline Service için 'dialog.turn.completed' olayını fırlat
                                 let event_payload = json!({
                                     "session_id": session_id,
                                     "trace_id": trace_id,
@@ -227,7 +226,7 @@ impl DialogService for DialogServerImpl {
                                     }))
                                     .await;
 
-                                info!(event = "DIALOG_TURN_COMPLETED", trace_id = %trace_id, span_id = %span_id, "Dialog turn finished and sent to MQ.");
+                                info!(event = "DIALOG_TURN_COMPLETED", trace_id = %trace_id, span_id = %span_id, "Dialog turn finished.");
                             }
                             Err(e) => {
                                 error!(event = "LLM_REQUEST_FAILED", trace_id = %trace_id, span_id = %span_id, error = %e, "Failed to call LLM Gateway.");
