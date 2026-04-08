@@ -113,7 +113,13 @@ impl DialogService for DialogServerImpl {
 
                         let mut history = state_mgr.get_history(&session_id).await;
 
-                        let rag_context = if !user_input.is_empty() {
+                        // [ARCH-COMPLIANCE FIX]: Task-05 - RAG Noise/Hallucination Filter
+                        let is_filler = user_input.eq_ignore_ascii_case("evet")
+                            || user_input.eq_ignore_ascii_case("hayır")
+                            || user_input.eq_ignore_ascii_case("tamam")
+                            || user_input.len() < 10;
+
+                        let rag_context = if !user_input.is_empty() && !is_filler {
                             if let Some(resp) = rag_cli
                                 .query(&tenant_id, &user_input, &trace_id, &span_id)
                                 .await
@@ -133,7 +139,7 @@ impl DialogService for DialogServerImpl {
                                 None
                             }
                         } else {
-                            None
+                            None // Filler word ise RAG sorgusu atılmaz (Sıfır Gecikme)
                         };
 
                         let llama_req = GenerateStreamRequest {

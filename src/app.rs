@@ -46,6 +46,10 @@ impl App {
             GhostPublisher::new(config.rabbitmq_url.clone(), config.tenant_id.clone()).await,
         );
 
+        // src/app.rs içerisindeki App::run() metodunda publisher oluşturulduktan hemen sonra:
+        use crate::state::mq::ReflexConsumer;
+        ReflexConsumer::start(config.rabbitmq_url.clone(), state_manager.clone()).await;
+
         let http_addr: SocketAddr = format!("{}:{}", config.host, config.http_port).parse()?;
         tokio::spawn(async move {
             start_health_server(http_addr).await;

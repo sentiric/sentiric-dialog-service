@@ -217,4 +217,15 @@ impl StateManager {
             }
         }
     }
+
+    // StateManager impl bloğu içerisine ekleyin:
+    pub async fn inject_reflex(&self, session_id: &str, instruction: String) {
+        let mut history = self.get_history(session_id).await;
+        // Fısıltı (Insight) olarak sistemi bilgilendirir
+        history.push(ConversationTurn {
+            role: "system".to_string(),
+            content: format!("[COGNITIVE_REFLEX]: {}", instruction),
+        });
+        self.save_history(session_id, history).await;
+    }
 }
