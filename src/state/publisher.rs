@@ -1,4 +1,7 @@
+use chrono::Utc;
 use lapin::{options::*, BasicProperties, Connection, ConnectionProperties};
+use prost::Message;
+use sentiric_contracts::sentiric::event::v1::GenericEvent;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -6,7 +9,6 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
 
-// [ARCH-COMPLIANCE FIX]: Clippy "type_complexity" hatasını çözmek için alias tanımlandı.
 type RmqPayload = (String, Vec<u8>);
 type SharedRingBuffer = Arc<Mutex<VecDeque<RmqPayload>>>;
 
@@ -14,10 +16,9 @@ const MAX_RING_BUFFER_SIZE: usize = 1000;
 
 pub struct GhostPublisher {
     rmq_url: String,
-    #[allow(dead_code)]
     tenant_id: String,
     connection: Arc<RwLock<Option<Connection>>>,
-    ring_buffer: SharedRingBuffer, // Karmaşık tip basitleştirildi
+    ring_buffer: SharedRingBuffer,
 }
 
 impl GhostPublisher {
@@ -129,8 +130,29 @@ impl GhostPublisher {
         });
     }
 
-    pub async fn publish(&self, routing_key: &str, payload: Value) {
-        let json_payload = serde_json::to_vec(&payload).unwrap_or_default();
+    pub async fn publish_event(&self, event_type: &str, trace_id: &str, payload: Value) {
+        let payload_json = payload.to_string();
+
+        let event = GenericEvent {
+            event_type: event_type.to_string(),
+            trace_id: trace_id.to_string(),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: Utc::now().timestamp(),
+                nanos: Utc::now().timestamp_subsec_nanos() as i32,
+            }),
+            tenant_id: self.tenant_id.clone(),
+            payload_json,
+        };
+
+        let mut bin_payload = Vec::new();
+        if event.encode(&mut bin_payload).is_err() {
+            warn!(
+                event = "EVENT_ENCODE_FAIL",
+                "Failed to encode GenericEvent using Protobuf."
+            );
+            return;
+        }
+
         let conn_opt = self.connection.read().await;
 
         if let Some(conn) = conn_opt.as_ref() {
@@ -138,9 +160,9 @@ impl GhostPublisher {
                 let res = channel
                     .basic_publish(
                         "sentiric_events",
-                        routing_key,
+                        event_type,
                         BasicPublishOptions::default(),
-                        &json_payload,
+                        &bin_payload,
                         BasicProperties::default(),
                     )
                     .await;
@@ -159,6 +181,6 @@ impl GhostPublisher {
                 "Dropping oldest event. Ghost Publisher limit reached."
             );
         }
-        buf.push_back((routing_key.to_string(), json_payload));
+        buf.push_back((event_type.to_string(), bin_payload));
     }
 }

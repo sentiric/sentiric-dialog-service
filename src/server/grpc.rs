@@ -193,7 +193,6 @@ impl DialogService for DialogServerImpl {
                                     }
                                 }
 
-                                // [ARCH-COMPLIANCE FIX]: Race condition olmaması için append_turns kullanıldı
                                 state_mgr
                                     .append_turns(
                                         &session_id,
@@ -216,8 +215,14 @@ impl DialogService for DialogServerImpl {
                                     "user_input": user_input,
                                     "assistant_response": assistant_response
                                 });
+
+                                // [ARCH-COMPLIANCE FIX]: Protobuf uyumlu GenericEvent olarak gönderiliyor.
                                 publisher
-                                    .publish("dialog.turn.completed", event_payload)
+                                    .publish_event(
+                                        "dialog.turn.completed",
+                                        &trace_id,
+                                        event_payload,
+                                    )
                                     .await;
 
                                 let _ = tx
