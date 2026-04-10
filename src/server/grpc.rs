@@ -116,10 +116,22 @@ impl DialogService for DialogServerImpl {
 
                         let history = state_mgr.get_history(&session_id).await;
 
-                        let is_filler = user_input.eq_ignore_ascii_case("evet")
-                            || user_input.eq_ignore_ascii_case("hayır")
-                            || user_input.eq_ignore_ascii_case("tamam")
-                            || user_input.len() < 10;
+                        // [ARCH-COMPLIANCE FIX]: Gelişmiş RAG Bypass (Halüsinasyon Filtresi)
+                        let lower_input = user_input.to_lowercase();
+                        let is_filler = lower_input == "evet"
+                            || lower_input == "hayır"
+                            || lower_input == "tamam"
+                            || lower_input == "peki"
+                            || lower_input == "anlamadım"
+                            || lower_input == "merhaba"
+                            || lower_input == "alo"
+                            || lower_input == "efendim"
+                            || lower_input == "teşekkürler"
+                            || lower_input == "sağol"
+                            || lower_input == "iyi günler"
+                            || lower_input == "anlıyorum"
+                            // 10 karakterden kısa, bilgi içermeyen kelimeler Vektör DB'yi yormamalı
+                            || user_input.chars().filter(|c| c.is_alphanumeric()).count() < 10;
 
                         let rag_context = if !user_input.is_empty() && !is_filler {
                             if let Some(resp) = rag_cli
@@ -141,6 +153,9 @@ impl DialogService for DialogServerImpl {
                                 None
                             }
                         } else {
+                            if is_filler {
+                                tracing::debug!(event = "RAG_BYPASSED", trace_id = %trace_id, input = %user_input, "Filler word detected. RAG context bypassed to prevent hallucinations.");
+                            }
                             None
                         };
 
@@ -216,7 +231,6 @@ impl DialogService for DialogServerImpl {
                                     "assistant_response": assistant_response
                                 });
 
-                                // [ARCH-COMPLIANCE FIX]: Protobuf uyumlu GenericEvent olarak gönderiliyor.
                                 publisher
                                     .publish_event(
                                         "dialog.turn.completed",
