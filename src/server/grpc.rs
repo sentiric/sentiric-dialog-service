@@ -116,22 +116,13 @@ impl DialogService for DialogServerImpl {
 
                         let history = state_mgr.get_history(&session_id).await;
 
-                        // [ARCH-COMPLIANCE FIX]: Gelişmiş RAG Bypass (Halüsinasyon Filtresi)
-                        let lower_input = user_input.to_lowercase();
-                        let is_filler = lower_input == "evet"
-                            || lower_input == "hayır"
-                            || lower_input == "tamam"
-                            || lower_input == "peki"
-                            || lower_input == "anlamadım"
-                            || lower_input == "merhaba"
-                            || lower_input == "alo"
-                            || lower_input == "efendim"
-                            || lower_input == "teşekkürler"
-                            || lower_input == "sağol"
-                            || lower_input == "iyi günler"
-                            || lower_input == "anlıyorum"
-                            // 10 karakterden kısa, bilgi içermeyen kelimeler Vektör DB'yi yormamalı
-                            || user_input.chars().filter(|c| c.is_alphanumeric()).count() < 10;
+                        // [ARCH-COMPLIANCE FIX]: Dil bağımsız (Language-Agnostic) Heuristic RAG Filtresi.
+                        // Hardcoded Türkçe kelimeler kaldırıldı. Yerine kelime ve karakter sayacı eklendi.
+                        // Mantık: 3 kelimeden az VEYA 15 karakterden kısa olan girdiler genellikle
+                        // onay/red/selamlama gibi (Yes, No, Tamam, Merhaba) dolgu kelimeleridir.
+                        // Bunlar için Vektör DB'yi (Qdrant) meşgul edip halüsinasyon yaratmaya gerek yoktur.
+                        let word_count = user_input.split_whitespace().count();
+                        let is_filler = word_count < 3 || user_input.len() < 15;
 
                         let rag_context = if !user_input.is_empty() && !is_filler {
                             if let Some(resp) = rag_cli
@@ -154,7 +145,7 @@ impl DialogService for DialogServerImpl {
                             }
                         } else {
                             if is_filler {
-                                tracing::debug!(event = "RAG_BYPASSED", trace_id = %trace_id, input = %user_input, "Filler word detected. RAG context bypassed to prevent hallucinations.");
+                                tracing::debug!(event = "RAG_BYPASSED", trace_id = %trace_id, input = %user_input, words = word_count, "Language-agnostic filler threshold met. RAG context bypassed.");
                             }
                             None
                         };
