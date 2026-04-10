@@ -182,22 +182,39 @@ impl DialogService for DialogServerImpl {
                                                     String::from_utf8_lossy(&bytes).to_string();
                                                 let mut clean_chunk = String::new();
 
-                                                // [ARCH-COMPLIANCE FIX]: Stateful Asterisk (*) Cleaner
-                                                // LLM'in ürettiği *gülümser* gibi metinleri TTS'e gitmeden önce yutar.
+                                                // [ARCH-COMPLIANCE FIX]: Universal Speech Sanitizer (V3)
+                                                // 1. LLM'in ürettiği *gülümser* gibi eylemleri temizler.
+                                                // 2. Emojileri ve TTS'i bozan (ıhh uhh yaptıran) Unicode sembollerini temizler.
                                                 for c in raw_chunk.chars() {
+                                                    // Yıldız kontrolü (Eylem state'ini değiştir)
                                                     if c == '*' {
                                                         in_action_text = !in_action_text;
                                                         continue;
                                                     }
+
+                                                    // Eğer eylem yazısının içinde değilsek karakteri kontrol et
                                                     if !in_action_text {
-                                                        clean_chunk.push(c);
+                                                        // [KRİTİK MİMARİ KARAR]: Sadece insan diline ait karakterlere izin ver.
+                                                        // - is_alphanumeric: Tüm dillerdeki harf ve sayıları kapsar (ğ, ü, ş, ö, ç dahil).
+                                                        // - is_ascii_punctuation: Nokta, virgül, soru işareti gibi durakları kapsar.
+                                                        // - is_whitespace: Boşlukları korur.
+                                                        // Bunların dışındaki her şey (😊, 🚀, 🧠, †, ‡ vb.) sessizce yutulur.
+                                                        if c.is_alphanumeric()
+                                                            || c.is_ascii_punctuation()
+                                                            || c.is_whitespace()
+                                                        {
+                                                            clean_chunk.push(c);
+                                                        } else {
+                                                            // Emojiyi veya garip karakteri loglamadan (sessizce) geçiyoruz
+                                                            // ki TTS (Coqui) saçmalamasın.
+                                                        }
                                                     }
                                                 }
 
                                                 assistant_response.push_str(&clean_chunk);
 
-                                                // Sadece temizlenmiş metin boş değilse (gerçekten söylenecek bir şey varsa) istemciye yolla
-                                                if !clean_chunk.is_empty() {
+                                                // Sadece temizlenmiş metin gerçekten söylenecek bir şey içeriyorsa gönder
+                                                if !clean_chunk.trim().is_empty() {
                                                     if tx
                                                         .send(Ok(StreamConversationResponse {
                                                             payload: Some(
