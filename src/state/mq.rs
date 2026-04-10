@@ -1,9 +1,12 @@
+// File: sentiric-dialog-service/src/state/mq.rs
 use crate::state::manager::StateManager;
 use futures::StreamExt;
 use lapin::{options::*, types::FieldTable, Connection, ConnectionProperties};
+use prost::Message; // [YENİ] Protobuf decode için
+use sentiric_contracts::sentiric::event::v1::GenericEvent; // [YENİ]
 use serde_json::Value;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 pub struct ReflexConsumer;
 
@@ -54,30 +57,35 @@ impl ReflexConsumer {
 
                             while let Some(delivery) = consumer.next().await {
                                 if let Ok(delivery) = delivery {
-                                    if let Ok(payload) =
-                                        serde_json::from_slice::<Value>(&delivery.data)
-                                    {
-                                        let trace_id = payload["trace_id"].as_str().unwrap_or("");
-                                        // [ARCH-COMPLIANCE FIX]: Dialog'un doğru session'ı bulması için eklendi
-                                        let session_id =
-                                            payload["session_id"].as_str().unwrap_or(trace_id);
-                                        let payload_json_str =
-                                            payload["payload_json"].as_str().unwrap_or("{}");
+                                    // [ARCH-COMPLIANCE FIX]: JSON yerine GenericEvent (Protobuf) Decode
+                                    match GenericEvent::decode(&*delivery.data) {
+                                        Ok(event_data) => {
+                                            let trace_id = event_data.trace_id;
+                                            let payload_json_str = event_data.payload_json;
 
-                                        if let Ok(insight) =
-                                            serde_json::from_str::<Value>(payload_json_str)
-                                        {
-                                            let instruction =
-                                                insight["instruction"].as_str().unwrap_or("");
-                                            if !instruction.is_empty() && !session_id.is_empty() {
-                                                info!(event = "INJECTING_REFLEX", session_id = %session_id, trace_id = %trace_id, "Applying cognitive modifier to session");
-                                                state_mgr
-                                                    .inject_reflex(
-                                                        session_id,
-                                                        instruction.to_string(),
-                                                    )
-                                                    .await;
+                                            if let Ok(insight) =
+                                                serde_json::from_str::<Value>(&payload_json_str)
+                                            {
+                                                let instruction =
+                                                    insight["instruction"].as_str().unwrap_or("");
+                                                // GenericEvent'te session_id olmadığı için trace_id'yi session_id olarak varsayıyoruz.
+                                                // Crystalline zaten call_id boşsa trace_id basıyordu.
+                                                let session_id = trace_id.clone();
+
+                                                if !instruction.is_empty() && !session_id.is_empty()
+                                                {
+                                                    info!(event = "INJECTING_REFLEX", session_id = %session_id, trace_id = %trace_id, "Applying cognitive modifier to session");
+                                                    state_mgr
+                                                        .inject_reflex(
+                                                            &session_id,
+                                                            instruction.to_string(),
+                                                        )
+                                                        .await;
+                                                }
                                             }
+                                        }
+                                        Err(e) => {
+                                            error!(event = "PROTO_UNMARSHAL_FAIL", error = %e, "Failed to decode GenericEvent for Reflex");
                                         }
                                     }
                                     let _ = delivery.ack(BasicAckOptions::default()).await;

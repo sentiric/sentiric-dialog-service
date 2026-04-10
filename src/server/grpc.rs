@@ -171,26 +171,47 @@ impl DialogService for DialogServerImpl {
                         {
                             Ok(mut llm_stream) => {
                                 let mut assistant_response = String::new();
+                                // [YENİ]: Yıldız (*) eylemlerini akış sırasında temizleme state'i
+                                let mut in_action_text = false;
 
                                 while let Some(Ok(llm_resp)) = llm_stream.next().await {
                                     if let Some(resp_inner) = llm_resp.llama_response {
                                         match resp_inner.r#type {
                                             Some(LlmResponseType::Token(bytes)) => {
-                                                let text_chunk =
+                                                let raw_chunk =
                                                     String::from_utf8_lossy(&bytes).to_string();
-                                                assistant_response.push_str(&text_chunk);
+                                                let mut clean_chunk = String::new();
 
-                                                if tx
-                                                    .send(Ok(StreamConversationResponse {
-                                                        payload: Some(RespPayload::TextResponse(
-                                                            text_chunk,
-                                                        )),
-                                                    }))
-                                                    .await
-                                                    .is_err()
-                                                {
-                                                    tracing::warn!(event = "DIALOG_STREAM_CANCELLED", trace_id = %trace_id, "Client disconnected (Barge-in).");
-                                                    return;
+                                                // [ARCH-COMPLIANCE FIX]: Stateful Asterisk (*) Cleaner
+                                                // LLM'in ürettiği *gülümser* gibi metinleri TTS'e gitmeden önce yutar.
+                                                for c in raw_chunk.chars() {
+                                                    if c == '*' {
+                                                        in_action_text = !in_action_text;
+                                                        continue;
+                                                    }
+                                                    if !in_action_text {
+                                                        clean_chunk.push(c);
+                                                    }
+                                                }
+
+                                                assistant_response.push_str(&clean_chunk);
+
+                                                // Sadece temizlenmiş metin boş değilse (gerçekten söylenecek bir şey varsa) istemciye yolla
+                                                if !clean_chunk.is_empty() {
+                                                    if tx
+                                                        .send(Ok(StreamConversationResponse {
+                                                            payload: Some(
+                                                                RespPayload::TextResponse(
+                                                                    clean_chunk,
+                                                                ),
+                                                            ),
+                                                        }))
+                                                        .await
+                                                        .is_err()
+                                                    {
+                                                        tracing::warn!(event = "DIALOG_STREAM_CANCELLED", trace_id = %trace_id, "Client disconnected (Barge-in).");
+                                                        return;
+                                                    }
                                                 }
                                             }
                                             Some(LlmResponseType::FinishDetails(_)) => {}
