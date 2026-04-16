@@ -123,8 +123,13 @@ impl DialogService for DialogServerImpl {
                         // Bunlar için Vektör DB'yi (Qdrant) meşgul edip halüsinasyon yaratmaya gerek yoktur.
                         let word_count = user_input.split_whitespace().count();
                         let is_filler = word_count < 3 || user_input.len() < 15;
+                        // [YENİ]: Sistem komutlarında RAG araması yapıp LLM'in kafasını karıştırma
+                        let is_system_command = user_input.contains("[SYSTEM");
 
-                        let rag_context = if !user_input.is_empty() && !is_filler {
+                        let rag_context = if !user_input.is_empty()
+                            && !is_filler
+                            && !is_system_command
+                        {
                             if let Some(resp) = rag_cli
                                 .query(&tenant_id, &user_input, &trace_id, &span_id)
                                 .await
@@ -145,7 +150,7 @@ impl DialogService for DialogServerImpl {
                             }
                         } else {
                             if is_filler {
-                                tracing::debug!(event = "RAG_BYPASSED", trace_id = %trace_id, input = %user_input, words = word_count, "Language-agnostic filler threshold met. RAG context bypassed.");
+                                tracing::debug!(event = "RAG_BYPASSED", trace_id = %trace_id, "Filler threshold met. RAG bypassed.");
                             }
                             None
                         };
@@ -214,8 +219,8 @@ impl DialogService for DialogServerImpl {
                                                 assistant_response.push_str(&clean_chunk);
 
                                                 // Sadece temizlenmiş metin gerçekten söylenecek bir şey içeriyorsa gönder
-                                                if !clean_chunk.trim().is_empty() {
-                                                    if tx
+                                                if !clean_chunk.trim().is_empty()
+                                                    && tx
                                                         .send(Ok(StreamConversationResponse {
                                                             payload: Some(
                                                                 RespPayload::TextResponse(
@@ -225,10 +230,9 @@ impl DialogService for DialogServerImpl {
                                                         }))
                                                         .await
                                                         .is_err()
-                                                    {
-                                                        tracing::warn!(event = "DIALOG_STREAM_CANCELLED", trace_id = %trace_id, "Client disconnected (Barge-in).");
-                                                        return;
-                                                    }
+                                                {
+                                                    tracing::warn!(event = "DIALOG_STREAM_CANCELLED", trace_id = %trace_id, "Client disconnected (Barge-in).");
+                                                    return;
                                                 }
                                             }
                                             Some(LlmResponseType::FinishDetails(_)) => {}
