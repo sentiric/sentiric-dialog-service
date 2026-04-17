@@ -256,6 +256,89 @@ impl DialogService for DialogServerImpl {
                                     )
                                     .await;
 
+                                // ====================================================================
+                                // [ARCH-COMPLIANCE FIX]: OTONOM BİLİŞSEL HAFIZA ÇIKARICI (V4.0)
+                                // UI hack'leri iptal edildi. Dialog servisi, kullanıcıya cevap verdikten
+                                // sonra arka planda LLM'i tekrar çağırarak kalıcı anıları çıkarır.
+                                // ====================================================================
+                                let bg_llm = llm_cli.clone();
+                                let bg_pub = publisher.clone();
+                                let bg_trace = trace_id.clone();
+                                let bg_span = span_id.clone();
+                                let bg_tenant = tenant_id.clone();
+                                let bg_session = session_id.clone();
+                                let bg_user_input = user_input.clone();
+                                let bg_assistant = assistant_response.clone();
+
+                                tokio::spawn(async move {
+                                    // Sadece 2 kelimeden uzun, anlamlı cümleleri analiz et
+                                    let word_count = bg_user_input.split_whitespace().count();
+                                    if word_count > 2 && !bg_user_input.contains("[SYSTEM") {
+                                        let extraction_prompt = format!(
+                                            "[SYSTEM_OVERRIDE_COGNITIVE_EXTRACTOR]\nGörevin, kullanıcının konuşmasından KALICI GERÇEKLERİ (Facts) çıkarmaktır. Çıktı KESİNLİKLE aşağıdaki JSON dizisi (Array) formatında olmalıdır. Önem derecesi (importance) 1 ile 5 arasındadır. Çıkarılacak bir bilgi yoksa boş dizi [] dön. FORMAT: [{{\"category\": \"kişisel_bilgi\", \"importance\": 4, \"summary\": \"500 USD yatırım planı var\", \"metadata\": [\"bütçe\"]}}]\n\nKULLANICI: \"{}\"\nASİSTAN: \"{}\"",
+                                            bg_user_input, bg_assistant
+                                        );
+
+                                        let llama_req = GenerateStreamRequest {
+                                            system_prompt: "PROMPT_SYSTEM_MEMORY_EXTRACTOR"
+                                                .to_string(),
+                                            user_prompt: extraction_prompt.clone(),
+                                            rag_context: None,
+                                            history: vec![],
+                                            params: None,
+                                            lora_adapter_id: None,
+                                        };
+
+                                        let dialog_req = GenerateDialogStreamRequest {
+                                            model_selector: "local".to_string(),
+                                            tenant_id: bg_tenant.clone(),
+                                            llama_request: Some(llama_req),
+                                        };
+
+                                        // LLM'e arka planda istek at (Kullanıcıyı bloklamaz)
+                                        if let Ok(mut stream) = bg_llm
+                                            .generate_stream(
+                                                dialog_req, &bg_trace, &bg_span, &bg_tenant,
+                                            )
+                                            .await
+                                        {
+                                            let mut extracted_json = String::new();
+                                            while let Some(Ok(resp)) = stream.next().await {
+                                                if let Some(inner) = resp.llama_response {
+                                                    if let Some(LlmResponseType::Token(bytes)) =
+                                                        inner.r#type
+                                                    {
+                                                        extracted_json.push_str(
+                                                            &String::from_utf8_lossy(&bytes),
+                                                        );
+                                                    }
+                                                }
+                                            }
+
+                                            // Eğer LLM boş dizi '[]' dönmediyse, Crystalline için RabbitMQ'ya bas!
+                                            if extracted_json.contains('[')
+                                                && extracted_json.len() > 10
+                                            {
+                                                let fact_payload = json!({
+                                                    "session_id": bg_session,
+                                                    "trace_id": bg_trace,
+                                                    "user_input": extraction_prompt, // Şifreli prompt
+                                                    "assistant_response": extracted_json // Saf JSON
+                                                });
+                                                bg_pub
+                                                    .publish_event(
+                                                        "dialog.turn.completed",
+                                                        &bg_trace,
+                                                        fact_payload,
+                                                    )
+                                                    .await;
+                                                tracing::info!(event="AUTONOMOUS_MEMORY_EXTRACTED", trace_id=%bg_trace, "Arka planda hafıza çıkarıldı ve Crystalline'e gönderildi.");
+                                            }
+                                        }
+                                    }
+                                });
+                                // ====================================================================
+
                                 let _ = tx
                                     .send(Ok(StreamConversationResponse {
                                         payload: Some(RespPayload::IsFinalResponse(true)),
