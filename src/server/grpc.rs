@@ -116,14 +116,14 @@ impl DialogService for DialogServerImpl {
 
                         let history = state_mgr.get_history(&session_id).await;
 
-                        // [ARCH-COMPLIANCE FIX]: Dil bağımsız (Language-Agnostic) Heuristic RAG Filtresi.
-                        // Hardcoded Türkçe kelimeler kaldırıldı. Yerine kelime ve karakter sayacı eklendi.
-                        // Mantık: 3 kelimeden az VEYA 15 karakterden kısa olan girdiler genellikle
-                        // onay/red/selamlama gibi (Yes, No, Tamam, Merhaba) dolgu kelimeleridir.
-                        // Bunlar için Vektör DB'yi (Qdrant) meşgul edip halüsinasyon yaratmaya gerek yoktur.
+                        // [ARCH-COMPLIANCE FIX]: Master Spec v4.0 RAG/Memory Retrieval Algoritması
+                        let is_question = user_input.contains('?')
+                            || user_input.to_lowercase().contains("kim")
+                            || user_input.to_lowercase().contains("ne");
                         let word_count = user_input.split_whitespace().count();
-                        let is_filler = word_count < 3 || user_input.len() < 15;
-                        // [YENİ]: Sistem komutlarında RAG araması yapıp LLM'in kafasını karıştırma
+
+                        // Soru soruluyorsa asla filler sayılmaz, kesinlikle hafızaya (Qdrant) gidilir.
+                        let is_filler = !is_question && (word_count < 3 || user_input.len() < 15);
                         let is_system_command = user_input.contains("[SYSTEM");
 
                         let rag_context = if !user_input.is_empty()
@@ -150,7 +150,7 @@ impl DialogService for DialogServerImpl {
                             }
                         } else {
                             if is_filler {
-                                tracing::debug!(event = "RAG_BYPASSED", trace_id = %trace_id, "Filler threshold met. RAG bypassed.");
+                                tracing::debug!(event = "RAG_BYPASSED", trace_id = %trace_id, "Filler threshold met. No need to query memory.");
                             }
                             None
                         };
@@ -176,7 +176,6 @@ impl DialogService for DialogServerImpl {
                         {
                             Ok(mut llm_stream) => {
                                 let mut assistant_response = String::new();
-                                // [YENİ]: Yıldız (*) eylemlerini akış sırasında temizleme state'i
                                 let mut in_action_text = false;
 
                                 while let Some(Ok(llm_resp)) = llm_stream.next().await {
@@ -187,38 +186,23 @@ impl DialogService for DialogServerImpl {
                                                     String::from_utf8_lossy(&bytes).to_string();
                                                 let mut clean_chunk = String::new();
 
-                                                // [ARCH-COMPLIANCE FIX]: Universal Speech Sanitizer (V3)
-                                                // 1. LLM'in ürettiği *gülümser* gibi eylemleri temizler.
-                                                // 2. Emojileri ve TTS'i bozan (ıhh uhh yaptıran) Unicode sembollerini temizler.
                                                 for c in raw_chunk.chars() {
-                                                    // Yıldız kontrolü (Eylem state'ini değiştir)
                                                     if c == '*' {
                                                         in_action_text = !in_action_text;
                                                         continue;
                                                     }
 
-                                                    // Eğer eylem yazısının içinde değilsek karakteri kontrol et
-                                                    if !in_action_text {
-                                                        // [KRİTİK MİMARİ KARAR]: Sadece insan diline ait karakterlere izin ver.
-                                                        // - is_alphanumeric: Tüm dillerdeki harf ve sayıları kapsar (ğ, ü, ş, ö, ç dahil).
-                                                        // - is_ascii_punctuation: Nokta, virgül, soru işareti gibi durakları kapsar.
-                                                        // - is_whitespace: Boşlukları korur.
-                                                        // Bunların dışındaki her şey (😊, 🚀, 🧠, †, ‡ vb.) sessizce yutulur.
-                                                        if c.is_alphanumeric()
+                                                    if !in_action_text
+                                                        && (c.is_alphanumeric()
                                                             || c.is_ascii_punctuation()
-                                                            || c.is_whitespace()
-                                                        {
-                                                            clean_chunk.push(c);
-                                                        } else {
-                                                            // Emojiyi veya garip karakteri loglamadan (sessizce) geçiyoruz
-                                                            // ki TTS (Coqui) saçmalamasın.
-                                                        }
+                                                            || c.is_whitespace())
+                                                    {
+                                                        clean_chunk.push(c);
                                                     }
                                                 }
 
                                                 assistant_response.push_str(&clean_chunk);
 
-                                                // Sadece temizlenmiş metin gerçekten söylenecek bir şey içeriyorsa gönder
                                                 if !clean_chunk.trim().is_empty()
                                                     && tx
                                                         .send(Ok(StreamConversationResponse {

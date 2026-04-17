@@ -2597,8 +2597,8 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "sentiric-contracts"
-version = "1.20.9"
-source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.20.9#a6c953dcb0e9267280a60fffccb586421f70ce42"
+version = "1.22.0"
+source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.22.0#cf5ce2200a699c723ba06e9c87ec4c5773c14d20"
 dependencies = [
  "prost",
  "prost-types",
@@ -2609,7 +2609,7 @@ dependencies = [
 
 [[package]]
 name = "sentiric-dialog-service"
-version = "1.1.14"
+version = "1.1.15"
 dependencies = [
  "anyhow",
  "async-stream",
