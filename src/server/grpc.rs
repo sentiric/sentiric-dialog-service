@@ -341,7 +341,9 @@ impl DialogService for DialogServerImpl {
                                                     let fact_payload = serde_json::json!({
                                                         "session_id": bg_session,
                                                         "trace_id": bg_trace,
-                                                        "user_input": bg_user_input,
+                                                        // KÖK NEDEN BURASIYDI! bg_user_input yerine extraction_prompt gönderilmeli ki
+                                                        // Crystalline servisi bunun bir "Hafıza Çıkarım İşlemi" olduğunu anlasın.
+                                                        "user_input": extraction_prompt,
                                                         "assistant_response": extracted_json
                                                     });
 
