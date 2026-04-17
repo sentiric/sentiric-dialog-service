@@ -274,7 +274,7 @@ impl DialogService for DialogServerImpl {
                                         tracing::info!(event="AUTONOMOUS_MEMORY_START", trace_id=%bg_trace, "Arka plan hafıza çıkarımı tetiklendi (Detached).");
 
                                         let extraction_prompt = format!(
-                                            "[SYSTEM_OVERRIDE_COGNITIVE_EXTRACTOR]\nGörevin, kullanıcının konuşmasından KALICI GERÇEKLERİ (Facts) çıkarmaktır. Çıktı KESİNLİKLE aşağıdaki JSON dizisi (Array) formatında olmalıdır. Önem derecesi 1 ile 5 arasındadır. Çıkarılacak bir bilgi yoksa boş dizi [] dön. FORMAT: [{{\"category\": \"kişisel_bilgi\", \"importance\": 4, \"summary\": \"500 USD yatırım planı var\", \"metadata\": [\"bütçe\"]}}]\n\nKULLANICI: \"{}\"\nASİSTAN: \"{}\"",
+                                            "<SYSTEM_OVERRIDE_COGNITIVE_EXTRACTOR>\nGörevin, kullanıcının konuşmasından KALICI GERÇEKLERİ (Facts) çıkarmaktır. Çıktı KESİNLİKLE aşağıdaki JSON dizisi (Array) formatında olmalıdır. Önem derecesi 1 ile 5 arasındadır. Çıkarılacak bir bilgi yoksa boş dizi [] dön. FORMAT: [{{\"category\": \"kişisel_bilgi\", \"importance\": 4, \"summary\": \"500 USD yatırım planı var\", \"metadata\": [\"bütçe\"]}}]\n\nKULLANICI: \"{}\"\nASİSTAN: \"{}\"",
                                             bg_user_input, bg_assistant
                                         );
 
