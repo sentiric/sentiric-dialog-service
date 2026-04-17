@@ -256,9 +256,7 @@ impl DialogService for DialogServerImpl {
                                     )
                                     .await;
 
-                                // ====================================================================
-                                // [ARCH-COMPLIANCE FIX]: OTONOM BİLİŞSEL HAFIZA ÇIKARICI (V4.1)
-                                // ====================================================================
+                                // [ARCH-COMPLIANCE]: OTONOM BİLİŞSEL HAFIZA ÇIKARICI (V4.2 - BULLETPROOF)
                                 let bg_llm = llm_cli.clone();
                                 let bg_pub = publisher.clone();
                                 let bg_trace = trace_id.clone();
@@ -268,13 +266,12 @@ impl DialogService for DialogServerImpl {
                                 let bg_user_input = user_input.clone();
                                 let bg_assistant = assistant_response.clone();
 
-                                // Arka plan görevini ana Task'tan bağımsız başlat!
-                                tokio::task::spawn(async move {
-                                    // Çok kısa veya sistem kelimesi içerenleri atla
+                                // 1. Ana gRPC Task'ından %100 Bağımsız Yeni Bir İş Parçacığı
+                                tokio::spawn(async move {
                                     if bg_user_input.len() > 10
                                         && !bg_user_input.contains("[SYSTEM")
                                     {
-                                        tracing::debug!(event="AUTONOMOUS_MEMORY_START", trace_id=%bg_trace, "Arka plan hafıza çıkarımı başlatıldı.");
+                                        tracing::info!(event="AUTONOMOUS_MEMORY_START", trace_id=%bg_trace, "Arka plan hafıza çıkarımı tetiklendi (Detached).");
 
                                         let extraction_prompt = format!(
                                             "[SYSTEM_OVERRIDE_COGNITIVE_EXTRACTOR]\nGörevin, kullanıcının konuşmasından KALICI GERÇEKLERİ (Facts) çıkarmaktır. Çıktı KESİNLİKLE aşağıdaki JSON dizisi (Array) formatında olmalıdır. Önem derecesi 1 ile 5 arasındadır. Çıkarılacak bir bilgi yoksa boş dizi [] dön. FORMAT: [{{\"category\": \"kişisel_bilgi\", \"importance\": 4, \"summary\": \"500 USD yatırım planı var\", \"metadata\": [\"bütçe\"]}}]\n\nKULLANICI: \"{}\"\nASİSTAN: \"{}\"",
@@ -297,40 +294,57 @@ impl DialogService for DialogServerImpl {
                                             llama_request: Some(llama_req),
                                         };
 
-                                        match bg_llm
-                                            .generate_stream(
-                                                dialog_req, &bg_trace, &bg_span, &bg_tenant,
-                                            )
-                                            .await
-                                        {
-                                            Ok(mut stream) => {
-                                                let mut extracted_json = String::new();
-                                                while let Some(Ok(resp)) = stream.next().await {
-                                                    if let Some(inner) = resp.llama_response {
-                                                        if let Some(LlmResponseType::Token(bytes)) =
-                                                            inner.r#type
-                                                        {
-                                                            extracted_json.push_str(
-                                                                &String::from_utf8_lossy(&bytes),
-                                                            );
+                                        // 2. Kilitlenme (Deadlock) Koruması: Max 15 Saniye
+                                        let extraction_task = async {
+                                            match bg_llm
+                                                .generate_stream(
+                                                    dialog_req, &bg_trace, &bg_span, &bg_tenant,
+                                                )
+                                                .await
+                                            {
+                                                Ok(mut stream) => {
+                                                    let mut extracted_json = String::new();
+                                                    while let Some(Ok(resp)) = stream.next().await {
+                                                        if let Some(inner) = resp.llama_response {
+                                                            if let Some(LlmResponseType::Token(
+                                                                bytes,
+                                                            )) = inner.r#type
+                                                            {
+                                                                extracted_json.push_str(
+                                                                    &String::from_utf8_lossy(
+                                                                        &bytes,
+                                                                    ),
+                                                                );
+                                                            }
                                                         }
                                                     }
+                                                    extracted_json
                                                 }
+                                                Err(e) => {
+                                                    tracing::error!(event="AUTONOMOUS_MEMORY_LLM_ERROR", trace_id=%bg_trace, error=%e, "Hafıza çıkarımı LLM ağ hatası.");
+                                                    String::new()
+                                                }
+                                            }
+                                        };
 
-                                                tracing::debug!(event="AUTONOMOUS_LLM_RAW_OUTPUT", trace_id=%bg_trace, output=%extracted_json, "Arka plan LLM yanıtı geldi.");
-
+                                        match tokio::time::timeout(
+                                            std::time::Duration::from_secs(15),
+                                            extraction_task,
+                                        )
+                                        .await
+                                        {
+                                            Ok(extracted_json) => {
                                                 if extracted_json.contains('[')
                                                     && extracted_json.len() > 10
                                                     && !extracted_json.contains("NONE")
                                                 {
-                                                    let fact_payload = json!({
+                                                    let fact_payload = serde_json::json!({
                                                         "session_id": bg_session,
                                                         "trace_id": bg_trace,
-                                                        "user_input": extraction_prompt,
+                                                        "user_input": bg_user_input,
                                                         "assistant_response": extracted_json
                                                     });
 
-                                                    // RabbitMQ'ya bas
                                                     bg_pub
                                                         .publish_event(
                                                             "dialog.turn.completed",
@@ -338,13 +352,13 @@ impl DialogService for DialogServerImpl {
                                                             fact_payload,
                                                         )
                                                         .await;
-                                                    tracing::info!(event="AUTONOMOUS_MEMORY_EXTRACTED", trace_id=%bg_trace, "Arka planda hafıza çıkarıldı ve MQ'ya gönderildi.");
+                                                    tracing::info!(event="AUTONOMOUS_MEMORY_EXTRACTED", trace_id=%bg_trace, "Mühürlendi: Qdrant için olay MQ'ya iletildi.");
                                                 } else {
-                                                    tracing::debug!(event="AUTONOMOUS_MEMORY_SKIP", trace_id=%bg_trace, "LLM kalıcı bir gerçek (Fact) bulamadı.");
+                                                    tracing::debug!(event="AUTONOMOUS_MEMORY_SKIP", trace_id=%bg_trace, "Çıkarılacak kalıcı gerçek bulunamadı.");
                                                 }
                                             }
-                                            Err(e) => {
-                                                tracing::error!(event="AUTONOMOUS_MEMORY_LLM_ERROR", trace_id=%bg_trace, error=%e, "Hafıza çıkarımı sırasında LLM hatası.");
+                                            Err(_) => {
+                                                tracing::error!(event="AUTONOMOUS_MEMORY_TIMEOUT", trace_id=%bg_trace, "Arka plan LLM işlemi zaman aşımına uğradı (15s).");
                                             }
                                         }
                                     }
