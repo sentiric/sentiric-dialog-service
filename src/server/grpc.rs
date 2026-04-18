@@ -23,6 +23,18 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info};
 
+/// DTO for detached cognitive tasks, strictly adheres to anti-spaghetti rules
+struct CognitivePayload {
+    llm_cli: Arc<LlmClient>,
+    publisher: Arc<GhostPublisher>,
+    tenant_id: String,
+    session_id: String,
+    trace_id: String,
+    span_id: String,
+    user_input: String,
+    assistant_response: String,
+}
+
 pub struct DialogServerImpl {
     state_manager: Arc<StateManager>,
     llm_client: Arc<LlmClient>,
@@ -43,6 +55,157 @@ impl DialogServerImpl {
             knowledge_client,
             publisher,
         }
+    }
+
+    async fn fetch_rag_context(
+        rag_cli: &KnowledgeClient,
+        tenant_id: &str,
+        user_input: &str,
+        trace_id: &str,
+        span_id: &str,
+    ) -> Option<String> {
+        let is_question = user_input.contains('?')
+            || user_input.to_lowercase().contains("kim")
+            || user_input.to_lowercase().contains("ne");
+
+        let word_count = user_input.split_whitespace().count();
+        let is_filler = !is_question && (word_count < 3 || user_input.len() < 15);
+        let is_system_command = user_input.contains("[SYSTEM");
+
+        if !user_input.is_empty() && !is_filler && !is_system_command {
+            if let Some(resp) = rag_cli
+                .query(tenant_id, user_input, trace_id, span_id)
+                .await
+            {
+                let context_str = resp
+                    .results
+                    .iter()
+                    .map(|r| r.content.as_str())
+                    .collect::<Vec<&str>>()
+                    .join("\n");
+
+                if context_str.is_empty() {
+                    None
+                } else {
+                    Some(context_str)
+                }
+            } else {
+                None
+            }
+        } else {
+            if is_filler {
+                tracing::debug!(event = "RAG_BYPASSED", trace_id = %trace_id, "Filler threshold met. No need to query memory.");
+            }
+            None
+        }
+    }
+
+    fn clean_llm_chunk(raw_chunk: &str, in_action_text: &mut bool) -> String {
+        let mut clean_chunk = String::new();
+        for c in raw_chunk.chars() {
+            if c == '*' {
+                *in_action_text = !*in_action_text;
+                continue;
+            }
+            if !*in_action_text
+                && (c.is_alphanumeric() || c.is_ascii_punctuation() || c.is_whitespace())
+            {
+                clean_chunk.push(c);
+            }
+        }
+        clean_chunk
+    }
+
+    /// [CLEANED]: Payload struct used to bypass argument count limits.
+    fn spawn_cognitive_task(payload: CognitivePayload) {
+        tokio::spawn(async move {
+            if payload.user_input.len() > 10 && !payload.user_input.contains("[SYSTEM") {
+                tracing::info!(event="AUTONOMOUS_MEMORY_START", trace_id=%payload.trace_id, "Arka plan hafıza çıkarımı tetiklendi.");
+
+                let extraction_prompt = format!(
+                    "<SYSTEM_OVERRIDE_COGNITIVE_EXTRACTOR>\nGörevin, kullanıcının konuşmasından KALICI GERÇEKLERİ (Facts) çıkarmaktır. Çıktı KESİNLİKLE aşağıdaki JSON dizisi (Array) formatında olmalıdır. Önem derecesi 1 ile 5 arasındadır. Çıkarılacak bir bilgi yoksa boş dizi [] dön. FORMAT: [{{\"category\": \"kişisel_bilgi\", \"importance\": 4, \"summary\": \"500 USD yatırım planı var\", \"metadata\": [\"bütçe\"]}}]\n\nKULLANICI: \"{}\"\nASİSTAN: \"{}\"",
+                    payload.user_input, payload.assistant_response
+                );
+
+                let llama_req = GenerateStreamRequest {
+                    system_prompt: "PROMPT_SYSTEM_MEMORY_EXTRACTOR".to_string(),
+                    user_prompt: extraction_prompt.clone(),
+                    rag_context: None,
+                    history: vec![],
+                    params: None,
+                    lora_adapter_id: None,
+                };
+
+                let dialog_req = GenerateDialogStreamRequest {
+                    model_selector: "local".to_string(),
+                    tenant_id: payload.tenant_id.clone(),
+                    llama_request: Some(llama_req),
+                };
+
+                let extraction_task = async {
+                    match payload
+                        .llm_cli
+                        .generate_stream(
+                            dialog_req,
+                            &payload.trace_id,
+                            &payload.span_id,
+                            &payload.tenant_id,
+                        )
+                        .await
+                    {
+                        Ok(mut stream) => {
+                            let mut extracted_json = String::new();
+                            while let Some(Ok(resp)) = stream.next().await {
+                                if let Some(inner) = resp.llama_response {
+                                    if let Some(LlmResponseType::Token(bytes)) = inner.r#type {
+                                        extracted_json.push_str(&String::from_utf8_lossy(&bytes));
+                                    }
+                                }
+                            }
+                            extracted_json
+                        }
+                        Err(e) => {
+                            tracing::error!(event="AUTONOMOUS_MEMORY_LLM_ERROR", trace_id=%payload.trace_id, error=%e, "Hafıza çıkarımı LLM ağ hatası.");
+                            String::new()
+                        }
+                    }
+                };
+
+                match tokio::time::timeout(std::time::Duration::from_secs(15), extraction_task)
+                    .await
+                {
+                    Ok(extracted_json) => {
+                        if extracted_json.contains('[')
+                            && extracted_json.len() > 10
+                            && !extracted_json.contains("NONE")
+                        {
+                            let fact_payload = json!({
+                                "session_id": payload.session_id,
+                                "trace_id": payload.trace_id,
+                                "user_input": payload.user_input,
+                                "assistant_response": payload.assistant_response,
+                                "extracted_facts": extracted_json
+                            });
+
+                            payload
+                                .publisher
+                                .publish_event(
+                                    "dialog.turn.completed",
+                                    &payload.trace_id,
+                                    fact_payload,
+                                )
+                                .await;
+                            tracing::info!(event="AUTONOMOUS_MEMORY_EXTRACTED", trace_id=%payload.trace_id, "Hafıza mühürlendi.");
+                        } else {
+                            tracing::debug!(event="AUTONOMOUS_MEMORY_SKIP", trace_id=%payload.trace_id, "Çıkarılacak kalıcı gerçek bulunamadı.");
+                        }
+                    }
+                    Err(_) => {
+                        tracing::error!(event="AUTONOMOUS_MEMORY_TIMEOUT", trace_id=%payload.trace_id, "Arka plan LLM işlemi zaman aşımına uğradı.");
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -115,43 +278,14 @@ impl DialogService for DialogServerImpl {
                         let user_input = accumulated_text.trim().to_string();
 
                         let history = state_mgr.get_history(&session_id).await;
-
-                        let is_question = user_input.contains('?')
-                            || user_input.to_lowercase().contains("kim")
-                            || user_input.to_lowercase().contains("ne");
-                        let word_count = user_input.split_whitespace().count();
-
-                        let is_filler = !is_question && (word_count < 3 || user_input.len() < 15);
-                        let is_system_command = user_input.contains("[SYSTEM");
-
-                        let rag_context = if !user_input.is_empty()
-                            && !is_filler
-                            && !is_system_command
-                        {
-                            if let Some(resp) = rag_cli
-                                .query(&tenant_id, &user_input, &trace_id, &span_id)
-                                .await
-                            {
-                                let context_str = resp
-                                    .results
-                                    .iter()
-                                    .map(|r| r.content.as_str())
-                                    .collect::<Vec<&str>>()
-                                    .join("\n");
-                                if context_str.is_empty() {
-                                    None
-                                } else {
-                                    Some(context_str)
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            if is_filler {
-                                tracing::debug!(event = "RAG_BYPASSED", trace_id = %trace_id, "Filler threshold met. No need to query memory.");
-                            }
-                            None
-                        };
+                        let rag_context = Self::fetch_rag_context(
+                            &rag_cli,
+                            &tenant_id,
+                            &user_input,
+                            &trace_id,
+                            &span_id,
+                        )
+                        .await;
 
                         let llama_req = GenerateStreamRequest {
                             system_prompt: system_prompt_id.clone(),
@@ -178,47 +312,30 @@ impl DialogService for DialogServerImpl {
 
                                 while let Some(Ok(llm_resp)) = llm_stream.next().await {
                                     if let Some(resp_inner) = llm_resp.llama_response {
-                                        match resp_inner.r#type {
-                                            Some(LlmResponseType::Token(bytes)) => {
-                                                let raw_chunk =
-                                                    String::from_utf8_lossy(&bytes).to_string();
-                                                let mut clean_chunk = String::new();
+                                        if let Some(LlmResponseType::Token(bytes)) =
+                                            resp_inner.r#type
+                                        {
+                                            let raw_chunk =
+                                                String::from_utf8_lossy(&bytes).to_string();
+                                            let clean_chunk = Self::clean_llm_chunk(
+                                                &raw_chunk,
+                                                &mut in_action_text,
+                                            );
+                                            assistant_response.push_str(&clean_chunk);
 
-                                                for c in raw_chunk.chars() {
-                                                    if c == '*' {
-                                                        in_action_text = !in_action_text;
-                                                        continue;
-                                                    }
-
-                                                    if !in_action_text
-                                                        && (c.is_alphanumeric()
-                                                            || c.is_ascii_punctuation()
-                                                            || c.is_whitespace())
-                                                    {
-                                                        clean_chunk.push(c);
-                                                    }
-                                                }
-
-                                                assistant_response.push_str(&clean_chunk);
-
-                                                if !clean_chunk.trim().is_empty()
-                                                    && tx
-                                                        .send(Ok(StreamConversationResponse {
-                                                            payload: Some(
-                                                                RespPayload::TextResponse(
-                                                                    clean_chunk,
-                                                                ),
-                                                            ),
-                                                        }))
-                                                        .await
-                                                        .is_err()
-                                                {
-                                                    tracing::warn!(event = "DIALOG_STREAM_CANCELLED", trace_id = %trace_id, "Client disconnected (Barge-in).");
-                                                    return;
-                                                }
+                                            if !clean_chunk.trim().is_empty()
+                                                && tx
+                                                    .send(Ok(StreamConversationResponse {
+                                                        payload: Some(RespPayload::TextResponse(
+                                                            clean_chunk,
+                                                        )),
+                                                    }))
+                                                    .await
+                                                    .is_err()
+                                            {
+                                                tracing::warn!(event = "DIALOG_STREAM_CANCELLED", trace_id = %trace_id, "Client disconnected (Barge-in).");
+                                                return;
                                             }
-                                            Some(LlmResponseType::FinishDetails(_)) => {}
-                                            None => {}
                                         }
                                     }
                                 }
@@ -239,14 +356,12 @@ impl DialogService for DialogServerImpl {
                                     )
                                     .await;
 
-                                // Normal Turn Completed Event'ini Bas
                                 let event_payload = json!({
                                     "session_id": session_id,
                                     "trace_id": trace_id,
                                     "user_input": user_input,
                                     "assistant_response": assistant_response
                                 });
-
                                 publisher
                                     .publish_event(
                                         "dialog.turn.completed",
@@ -255,117 +370,18 @@ impl DialogService for DialogServerImpl {
                                     )
                                     .await;
 
-                                // [ARCH-COMPLIANCE FIX]: OTONOM BİLİŞSEL HAFIZA ÇIKARICI (V4.2 - CROSS-REFERENCE AUDITED)
-                                // Event Contract Mismatch ve Domain Logic Leakage giderildi. Crystalline için özel temiz payload basılır.
-                                let bg_llm = llm_cli.clone();
-                                let bg_pub = publisher.clone();
-                                let bg_trace = trace_id.clone();
-                                let bg_span = span_id.clone();
-                                let bg_tenant = tenant_id.clone();
-                                let bg_session = session_id.clone();
-                                let bg_user_input = user_input.clone();
-                                let bg_assistant = assistant_response.clone();
-
-                                tokio::spawn(async move {
-                                    if bg_user_input.len() > 10
-                                        && !bg_user_input.contains("[SYSTEM")
-                                    {
-                                        tracing::info!(event="AUTONOMOUS_MEMORY_START", trace_id=%bg_trace, "Arka plan hafıza çıkarımı tetiklendi (Detached).");
-
-                                        // Prompt kesinlikle RMQ'ya sızdırılmıyor, sadece LLM isteği için kullanılıyor.
-                                        let extraction_prompt = format!(
-                                            "<SYSTEM_OVERRIDE_COGNITIVE_EXTRACTOR>\nGörevin, kullanıcının konuşmasından KALICI GERÇEKLERİ (Facts) çıkarmaktır. Çıktı KESİNLİKLE aşağıdaki JSON dizisi (Array) formatında olmalıdır. Önem derecesi 1 ile 5 arasındadır. Çıkarılacak bir bilgi yoksa boş dizi [] dön. FORMAT: [{{\"category\": \"kişisel_bilgi\", \"importance\": 4, \"summary\": \"500 USD yatırım planı var\", \"metadata\": [\"bütçe\"]}}]\n\nKULLANICI: \"{}\"\nASİSTAN: \"{}\"",
-                                            bg_user_input, bg_assistant
-                                        );
-
-                                        let llama_req = GenerateStreamRequest {
-                                            system_prompt: "PROMPT_SYSTEM_MEMORY_EXTRACTOR"
-                                                .to_string(),
-                                            user_prompt: extraction_prompt.clone(),
-                                            rag_context: None,
-                                            history: vec![],
-                                            params: None,
-                                            lora_adapter_id: None,
-                                        };
-
-                                        let dialog_req = GenerateDialogStreamRequest {
-                                            model_selector: "local".to_string(),
-                                            tenant_id: bg_tenant.clone(),
-                                            llama_request: Some(llama_req),
-                                        };
-
-                                        let extraction_task = async {
-                                            match bg_llm
-                                                .generate_stream(
-                                                    dialog_req, &bg_trace, &bg_span, &bg_tenant,
-                                                )
-                                                .await
-                                            {
-                                                Ok(mut stream) => {
-                                                    let mut extracted_json = String::new();
-                                                    while let Some(Ok(resp)) = stream.next().await {
-                                                        if let Some(inner) = resp.llama_response {
-                                                            if let Some(LlmResponseType::Token(
-                                                                bytes,
-                                                            )) = inner.r#type
-                                                            {
-                                                                extracted_json.push_str(
-                                                                    &String::from_utf8_lossy(
-                                                                        &bytes,
-                                                                    ),
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                    extracted_json
-                                                }
-                                                Err(e) => {
-                                                    tracing::error!(event="AUTONOMOUS_MEMORY_LLM_ERROR", trace_id=%bg_trace, error=%e, "Hafıza çıkarımı LLM ağ hatası.");
-                                                    String::new()
-                                                }
-                                            }
-                                        };
-
-                                        match tokio::time::timeout(
-                                            std::time::Duration::from_secs(15),
-                                            extraction_task,
-                                        )
-                                        .await
-                                        {
-                                            Ok(extracted_json) => {
-                                                if extracted_json.contains('[')
-                                                    && extracted_json.len() > 10
-                                                    && !extracted_json.contains("NONE")
-                                                {
-                                                    // [ARCH-COMPLIANCE FIX]: Temiz Veri Sözleşmesi.
-                                                    // "extracted_facts" alanı oluşturuldu, iç sistem promptu sızdırılmıyor.
-                                                    let fact_payload = serde_json::json!({
-                                                        "session_id": bg_session,
-                                                        "trace_id": bg_trace,
-                                                        "user_input": bg_user_input,
-                                                        "assistant_response": bg_assistant,
-                                                        "extracted_facts": extracted_json
-                                                    });
-
-                                                    bg_pub
-                                                        .publish_event(
-                                                            "dialog.turn.completed",
-                                                            &bg_trace,
-                                                            fact_payload,
-                                                        )
-                                                        .await;
-                                                    tracing::info!(event="AUTONOMOUS_MEMORY_EXTRACTED", trace_id=%bg_trace, "Mühürlendi: Qdrant için temiz olay MQ'ya iletildi.");
-                                                } else {
-                                                    tracing::debug!(event="AUTONOMOUS_MEMORY_SKIP", trace_id=%bg_trace, "Çıkarılacak kalıcı gerçek bulunamadı.");
-                                                }
-                                            }
-                                            Err(_) => {
-                                                tracing::error!(event="AUTONOMOUS_MEMORY_TIMEOUT", trace_id=%bg_trace, "Arka plan LLM işlemi zaman aşımına uğradı (15s).");
-                                            }
-                                        }
-                                    }
+                                // DTO (CognitivePayload) Kullanılarak çağrı yapıldı.
+                                Self::spawn_cognitive_task(CognitivePayload {
+                                    llm_cli: llm_cli.clone(),
+                                    publisher: publisher.clone(),
+                                    tenant_id: tenant_id.clone(),
+                                    session_id: session_id.clone(),
+                                    trace_id: trace_id.clone(),
+                                    span_id: span_id.clone(),
+                                    user_input: user_input.clone(),
+                                    assistant_response: assistant_response.clone(),
                                 });
-                                // ====================================================================
+
                                 let _ = tx
                                     .send(Ok(StreamConversationResponse {
                                         payload: Some(RespPayload::IsFinalResponse(true)),
@@ -379,14 +395,12 @@ impl DialogService for DialogServerImpl {
                                 let _ = tx.send(Err(Status::internal("LLM Engine failed"))).await;
                             }
                         }
-
                         accumulated_text.clear();
                     }
                     _ => {}
                 }
             }
         });
-
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
