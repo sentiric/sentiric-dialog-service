@@ -116,13 +116,11 @@ impl DialogService for DialogServerImpl {
 
                         let history = state_mgr.get_history(&session_id).await;
 
-                        // [ARCH-COMPLIANCE FIX]: Master Spec v4.0 RAG/Memory Retrieval Algoritması
                         let is_question = user_input.contains('?')
                             || user_input.to_lowercase().contains("kim")
                             || user_input.to_lowercase().contains("ne");
                         let word_count = user_input.split_whitespace().count();
 
-                        // Soru soruluyorsa asla filler sayılmaz, kesinlikle hafızaya (Qdrant) gidilir.
                         let is_filler = !is_question && (word_count < 3 || user_input.len() < 15);
                         let is_system_command = user_input.contains("[SYSTEM");
 
@@ -241,6 +239,7 @@ impl DialogService for DialogServerImpl {
                                     )
                                     .await;
 
+                                // Normal Turn Completed Event'ini Bas
                                 let event_payload = json!({
                                     "session_id": session_id,
                                     "trace_id": trace_id,
@@ -256,7 +255,8 @@ impl DialogService for DialogServerImpl {
                                     )
                                     .await;
 
-                                // [ARCH-COMPLIANCE]: OTONOM BİLİŞSEL HAFIZA ÇIKARICI (V4.2 - BULLETPROOF)
+                                // [ARCH-COMPLIANCE FIX]: OTONOM BİLİŞSEL HAFIZA ÇIKARICI (V4.2 - CROSS-REFERENCE AUDITED)
+                                // Event Contract Mismatch ve Domain Logic Leakage giderildi. Crystalline için özel temiz payload basılır.
                                 let bg_llm = llm_cli.clone();
                                 let bg_pub = publisher.clone();
                                 let bg_trace = trace_id.clone();
@@ -266,13 +266,13 @@ impl DialogService for DialogServerImpl {
                                 let bg_user_input = user_input.clone();
                                 let bg_assistant = assistant_response.clone();
 
-                                // 1. Ana gRPC Task'ından %100 Bağımsız Yeni Bir İş Parçacığı
                                 tokio::spawn(async move {
                                     if bg_user_input.len() > 10
                                         && !bg_user_input.contains("[SYSTEM")
                                     {
                                         tracing::info!(event="AUTONOMOUS_MEMORY_START", trace_id=%bg_trace, "Arka plan hafıza çıkarımı tetiklendi (Detached).");
 
+                                        // Prompt kesinlikle RMQ'ya sızdırılmıyor, sadece LLM isteği için kullanılıyor.
                                         let extraction_prompt = format!(
                                             "<SYSTEM_OVERRIDE_COGNITIVE_EXTRACTOR>\nGörevin, kullanıcının konuşmasından KALICI GERÇEKLERİ (Facts) çıkarmaktır. Çıktı KESİNLİKLE aşağıdaki JSON dizisi (Array) formatında olmalıdır. Önem derecesi 1 ile 5 arasındadır. Çıkarılacak bir bilgi yoksa boş dizi [] dön. FORMAT: [{{\"category\": \"kişisel_bilgi\", \"importance\": 4, \"summary\": \"500 USD yatırım planı var\", \"metadata\": [\"bütçe\"]}}]\n\nKULLANICI: \"{}\"\nASİSTAN: \"{}\"",
                                             bg_user_input, bg_assistant
@@ -294,7 +294,6 @@ impl DialogService for DialogServerImpl {
                                             llama_request: Some(llama_req),
                                         };
 
-                                        // 2. Kilitlenme (Deadlock) Koruması: Max 15 Saniye
                                         let extraction_task = async {
                                             match bg_llm
                                                 .generate_stream(
@@ -338,13 +337,14 @@ impl DialogService for DialogServerImpl {
                                                     && extracted_json.len() > 10
                                                     && !extracted_json.contains("NONE")
                                                 {
+                                                    // [ARCH-COMPLIANCE FIX]: Temiz Veri Sözleşmesi.
+                                                    // "extracted_facts" alanı oluşturuldu, iç sistem promptu sızdırılmıyor.
                                                     let fact_payload = serde_json::json!({
                                                         "session_id": bg_session,
                                                         "trace_id": bg_trace,
-                                                        // KÖK NEDEN BURASIYDI! bg_user_input yerine extraction_prompt gönderilmeli ki
-                                                        // Crystalline servisi bunun bir "Hafıza Çıkarım İşlemi" olduğunu anlasın.
-                                                        "user_input": extraction_prompt,
-                                                        "assistant_response": extracted_json
+                                                        "user_input": bg_user_input,
+                                                        "assistant_response": bg_assistant,
+                                                        "extracted_facts": extracted_json
                                                     });
 
                                                     bg_pub
@@ -354,7 +354,7 @@ impl DialogService for DialogServerImpl {
                                                             fact_payload,
                                                         )
                                                         .await;
-                                                    tracing::info!(event="AUTONOMOUS_MEMORY_EXTRACTED", trace_id=%bg_trace, "Mühürlendi: Qdrant için olay MQ'ya iletildi.");
+                                                    tracing::info!(event="AUTONOMOUS_MEMORY_EXTRACTED", trace_id=%bg_trace, "Mühürlendi: Qdrant için temiz olay MQ'ya iletildi.");
                                                 } else {
                                                     tracing::debug!(event="AUTONOMOUS_MEMORY_SKIP", trace_id=%bg_trace, "Çıkarılacak kalıcı gerçek bulunamadı.");
                                                 }
